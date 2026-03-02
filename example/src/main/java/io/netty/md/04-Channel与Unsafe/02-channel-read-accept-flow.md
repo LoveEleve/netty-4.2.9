@@ -338,15 +338,15 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
         }
     }
 
-    @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        final ChannelConfig config = ctx.channel().config();
-        if (config.isAutoRead()) {
-            config.setAutoRead(false);                          // [8] 暂停 accept 1 秒
-            ctx.channel().eventLoop().schedule(enableAutoReadTask, 1, TimeUnit.SECONDS);
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            final ChannelConfig config = ctx.channel().config();
+            if (config.isAutoRead()) {
+                config.setAutoRead(false);                          // [8] 暂停 accept 1 秒
+                ctx.channel().eventLoop().schedule(enableAutoReadTask, 1, TimeUnit.SECONDS);
+            }
+            ctx.fireExceptionCaught(cause);                        // [9] 🔥 继续传播异常事件，让用户有机会处理
         }
-        ctx.fireExceptionCaught(cause);
-    }
 }
 ```
 
@@ -697,7 +697,7 @@ public void readComplete() {
 
 **两次 record 的作用**：
 1. **`lastBytesRead` 中的 record**：如果单次读取就读满了 ByteBuf，说明数据量大，立即触发扩容判断
-2. **`readComplete` 中的 record**：用本轮总读取量做最终判断，主要用于缩容
+2. **`readComplete` 中的 record**：用本轮总读取量做最终判断，主要用于缩容。注意 `totalBytesRead()` 有溢出保护：`return totalBytesRead < 0 ? Integer.MAX_VALUE : totalBytesRead`，防止累计读取量 int 溢出变为负数后传入 `record()`，导致缩容逻辑误判
 
 ### 7.5 自适应过程示例（真实运行数据验证）
 
