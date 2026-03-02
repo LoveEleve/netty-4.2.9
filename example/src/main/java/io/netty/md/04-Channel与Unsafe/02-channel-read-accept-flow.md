@@ -185,7 +185,7 @@ private final class NioMessageUnsafe extends AbstractNioUnsafe {
 | [5] | `localRead == 0` | `accept()` 返回 null（没有新连接），退出循环 |
 | [6] | `localRead < 0` | Channel 已关闭（理论上 ServerSocketChannel 不会返回 -1，这是防御性代码） |
 | [7] | `incMessagesRead(1)` | `totalMessages++`，用于 `continueReading()` 判断 |
-| [8] | `continueReading(allocHandle)` | 🔥 **循环控制核心**：`autoRead && (!respectMaybeMoreData \|\| maybeMoreData) && totalMessages < 16 && (ignoreBytesRead \|\| totalBytesRead > 0)`。对 ServerChannel：`ignoreBytesRead=true`，最后一个条件始终满足；`respectMaybeMoreData` 默认 true，但 ServerChannel 的 `maybeMoreDataSupplier` 始终返回 true（因为 `attemptedBytesRead==lastBytesRead` 对 Message 类型不适用） |
+| [8] | `continueReading(allocHandle)` | 🔥 **循环控制核心**：`autoRead && (!respectMaybeMoreData \|\| maybeMoreData) && totalMessages < 16 && (ignoreBytesRead \|\| totalBytesRead > 0)`。对 ServerChannel：① `ignoreBytesRead=true`，最后一个条件始终满足；② `NioMessageUnsafe` 从不调用 `lastBytesRead()` 和 `attemptedBytesRead()`，两者始终为 0，`defaultMaybeMoreSupplier`（`0==0`）始终返回 true，所以 `respectMaybeMoreData` 条件也始终满足；最终只有 `totalMessages < 16` 和 `autoRead` 两个条件真正起作用 |
 | [9] | `fireChannelRead(readBuf.get(i))` | 🔥 **注意**：不是每 accept 一个就 fire，而是**批量 accept 完成后统一 fire**！msg 是 `NioSocketChannel` |
 | [10] | `readBuf.clear()` | 清空列表，但不释放 NioSocketChannel（它们已经被 Pipeline 处理了） |
 | [11] | `allocHandle.readComplete()` | 通知 allocHandle 本轮读取完成（对 ServerChannel 意义不大，主要用于 ByteChannel） |
@@ -295,8 +295,8 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
     private final ChannelHandler childHandler;    // 用户配置的 childHandler（如 EchoServerHandler）
     private final Entry<ChannelOption<?>, Object>[] childOptions;
     private final Entry<AttributeKey<?>, Object>[] childAttrs;
+    private final Runnable enableAutoReadTask;    // 用于恢复 autoRead 的任务（在构造函数中提前创建，防止 too many open files 时 ClassLoader 无法加载）
     private final Collection<ChannelInitializerExtension> extensions;
-    private final Runnable enableAutoReadTask;    // 用于恢复 autoRead 的任务
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -557,7 +557,7 @@ public final void read() {
 | [12] | `byteBuf = null` | 置 null 防止 finally 中重复 release（ByteBuf 已经交给 Pipeline 处理了） |
 | [13] | `continueReading()` | 🔥 **核心判断**：`autoRead && totalMessages < 16 && lastBytesRead == attemptedBytesRead`（读满了才继续） |
 | [14] | `allocHandle.readComplete()` | 通知 AdaptiveCalculator 本轮总读取量，用于调整下次 ByteBuf 大小 |
-| [16] | `closeOnRead(pipeline)` | 🔥 **注意**：`fireChannelReadComplete()` 在 [15] 处已经触发，`closeOnRead()` 本身不再触发它。默认（`allowHalfClosure=false`）调用 `close(voidPromise())` 关闭连接；若 `allowHalfClosure=true` 则调用 `shutdownInput()` + `fireUserEventTriggered(ChannelInputShutdownEvent)` 实现半关闭 |
+| [16] | `closeOnRead(pipeline)` | 🔥 **注意**：`fireChannelReadComplete()` 在 [15] 处已经触发，`closeOnRead()` 本身不再触发它。有三个分支：① 输入未关闭 + `allowHalfClosure=false`（默认）→ `close(voidPromise())` 关闭连接；② 输入未关闭 + `allowHalfClosure=true` → `shutdownInput()` + `fireUserEventTriggered(ChannelInputShutdownEvent)` 半关闭；③ 输入已关闭（`isInputShutdown0()=true`）且首次 → `inputClosedSeenErrorOnRead=true` + `fireUserEventTriggered(ChannelInputShutdownReadComplete)` |
 
 ### 6.3 NioByteUnsafe vs NioMessageUnsafe 的关键差异
 
@@ -624,8 +624,9 @@ SIZE_TABLE 的结构：
 | 范围 | 步长 | 档位数 | 说明 |
 |------|------|--------|------|
 | 16 ~ 496 | 16 | 31 档 | 小数据精细控制（16, 32, 48, ..., 496） |
-| 512 ~ 65536 | ×2 | 8 档 | 大数据粗粒度控制（512, 1024, 2048, ..., 65536） |
-| 65536 ~ MAX_INT | ×2 | 若干档 | 超大数据 |
+| 512 ~ 1073741824 | ×2 | 22 档 | 大数据粗粒度控制（512, 1024, 2048, ..., 1073741824） |
+
+> **注意**：SIZE_TABLE 共 **53 档**，最大值约 1GB。`maximum=65536` 是 `AdaptiveRecvByteBufAllocator` 的默认上限（`maxIndex=38`），不是 SIZE_TABLE 的上限。
 
 **默认参数**：
 - `minimum = 64`（最小 ByteBuf 大小）
@@ -699,8 +700,9 @@ public void readComplete() {
 
 > 以下数据通过运行 `AdaptiveCalculator` 逻辑验证，**非推断**（Skill #16）：
 > ```
-> SIZE_TABLE: [33]=2048, [34]=4096, [35]=8192, [36]=16384, [37]=32768, [38]=65536
-> INDEX_INCREMENT=4, INDEX_DECREMENT=1, maximum=65536 → maxIndex=38
+> SIZE_TABLE 共53档：[3]=64(minIndex), [33]=2048(initial), [36]=16384, [37]=32768, [38]=65536(maxIndex)
+> INDEX_INCREMENT=4, INDEX_DECREMENT=1, minimum=64(minIndex=3), maximum=65536(maxIndex=38)
+> 缩容条件：size <= SIZE_TABLE[max(0, index-1)]（注意是 index-1，不是 index）
 > ```
 
 ```mermaid
@@ -715,7 +717,7 @@ graph LR
         C["record(32768)\n32768 >= nextSize(32768) → 扩容\nindex += 4 → 38（达到maxIndex）\nnextSize = min(SIZE_TABLE[38], 65536) = 65536"]
     end
     subgraph "第3轮：读了1024字节（未满）"
-        D["record(1024)\n1024 <= SIZE_TABLE[37]=16384 → decreaseNow=true\nnextSize 不变 = 65536"]
+        D["record(1024)\n此时index=38，缩容阈值=SIZE_TABLE[max(0,38-1)]=SIZE_TABLE[37]=32768\n1024 <= 32768 → decreaseNow=true，nextSize 不变 = 65536"]
     end
     subgraph "第4轮：读了1024字节（未满）"
         E["record(1024)\n连续两次 → 缩容\nindex -= 1 → 37\nnextSize = SIZE_TABLE[37] = 32768"]
