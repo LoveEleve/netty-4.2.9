@@ -1176,14 +1176,15 @@ protected void readComplete0(byte op, int res, int flags, short data, int outsta
     final ChannelPipeline pipeline = pipeline();
     allocHandle.lastBytesRead(res);
 
-    if (res >= 0) {
-        allocHandle.incMessagesRead(1);
-        final ByteBuffer acceptedAddressBuffer;
-        if (acceptedAddressMemory == null) {
-            acceptedAddressBuffer = null;  // multishot 模式，无地址
-        } else {
-            acceptedAddressBuffer = acceptedAddressMemory.acceptedAddressMemory;
-        }
+            if (res >= 0) {
+                allocHandle.incMessagesRead(1);
+                final ByteBuffer acceptedAddressBuffer;
+                final long acceptedAddressLengthMemoryAddress;
+                if (acceptedAddressMemory == null) {
+                    acceptedAddressBuffer = null;  // multishot 模式，无地址
+                } else {
+                    acceptedAddressBuffer = acceptedAddressMemory.acceptedAddressMemory;
+                }
         try {
             Channel channel = newChildChannel(res, acceptedAddressBuffer);
             pipeline.fireChannelRead(channel);
