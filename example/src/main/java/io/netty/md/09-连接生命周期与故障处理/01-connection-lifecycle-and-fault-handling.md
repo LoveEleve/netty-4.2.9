@@ -1170,6 +1170,8 @@ public void channelInactive(ChannelHandlerContext ctx) {
 - `AbstractIdleTask.run()` 中 `!ctx.channel().isOpen()` 检查（Channel 已关闭时不执行）✅
 - `ReaderIdleTimeoutTask.run()` 中先重新调度再触发事件（防止事件处理异常导致任务丢失）✅
 - `ReadTimeoutHandler.readTimedOut()` 中 `if (!closed)` 检查（防止重复关闭）✅
+- `connect()` 中 `if (promise.isDone() || !ensureOpen(promise))` 前置检查（promise 已完成或 Channel 未打开时直接 return）✅
+- `connect()` 中 `if (connectPromise != null)` 检查（已有连接进行中时抛 `ConnectionPendingException`）✅
 - `connect()` 中 `connectTimeoutMillis > 0` 检查（0 表示不设超时）✅
 - `finishConnect()` 中 `if (connectTimeoutFuture != null)` 检查（未设超时时 future 为 null）✅
 - `close()` 中 `if (outboundBuffer != null)` 检查（outboundBuffer 可能已被 shutdownOutput 置 null）✅
