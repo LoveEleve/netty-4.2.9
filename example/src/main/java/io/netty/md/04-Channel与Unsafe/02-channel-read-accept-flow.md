@@ -185,7 +185,7 @@ private final class NioMessageUnsafe extends AbstractNioUnsafe {
 | [5] | `localRead == 0` | `accept()` 返回 null（没有新连接），退出循环 |
 | [6] | `localRead < 0` | Channel 已关闭（理论上 ServerSocketChannel 不会返回 -1，这是防御性代码） |
 | [7] | `incMessagesRead(1)` | `totalMessages++`，用于 `continueReading()` 判断 |
-| [8] | `continueReading(allocHandle)` | 🔥 **循环控制核心**：`totalMessages < maxMessagesPerRead(16) && autoRead` |
+| [8] | `continueReading(allocHandle)` | 🔥 **循环控制核心**：`autoRead && (!respectMaybeMoreData \|\| maybeMoreData) && totalMessages < 16 && (ignoreBytesRead \|\| totalBytesRead > 0)`。对 ServerChannel：`ignoreBytesRead=true`，最后一个条件始终满足；`respectMaybeMoreData` 默认 true，但 ServerChannel 的 `maybeMoreDataSupplier` 始终返回 true（因为 `attemptedBytesRead==lastBytesRead` 对 Message 类型不适用） |
 | [9] | `fireChannelRead(readBuf.get(i))` | 🔥 **注意**：不是每 accept 一个就 fire，而是**批量 accept 完成后统一 fire**！msg 是 `NioSocketChannel` |
 | [10] | `readBuf.clear()` | 清空列表，但不释放 NioSocketChannel（它们已经被 Pipeline 处理了） |
 | [11] | `allocHandle.readComplete()` | 通知 allocHandle 本轮读取完成（对 ServerChannel 意义不大，主要用于 ByteChannel） |
@@ -304,7 +304,12 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
 
         child.pipeline().addLast(childHandler);                 // [2] 🔥 添加用户的 childHandler
 
-        setChannelOptions(child, childOptions, logger);         // [3] 设置 SO_KEEPALIVE 等选项
+        try {
+            setChannelOptions(child, childOptions, logger);     // [3] 设置 SO_KEEPALIVE 等选项
+        } catch (Throwable cause) {
+            forceClose(child, cause);                           // [3a] ⚠️ 设置选项失败则强制关闭并 return！
+            return;
+        }
         setAttributes(child, childAttrs);                       // [4] 设置自定义属性
 
         // [5] SPI 扩展点
@@ -324,12 +329,12 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
                     @Override
                     public void operationComplete(ChannelFuture future) throws Exception {
                         if (!future.isSuccess()) {
-                            forceClose(child, future.cause()); // [7] 注册失败则强制关闭
+                            forceClose(child, future.cause()); // [7] 注册失败则强制关闭（closeForcibly + warn日志）
                         }
                     }
                 });
         } catch (Throwable t) {
-            forceClose(child, t);
+            forceClose(child, t);                               // [8] register 本身抛异常也强制关闭
         }
     }
 
@@ -351,7 +356,7 @@ private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapte
 |------|------|---------|
 | [1] | `(Channel) msg` | msg 就是 `NioSocketChannel`，这是 `doReadMessages()` 创建并通过 `fireChannelRead` 传递过来的 |
 | [2] | `child.pipeline().addLast(childHandler)` | 🔥 **在 Boss 线程中**给子 Channel 的 Pipeline 添加用户 Handler（如 `ChannelInitializer`）。此时子 Channel 还未注册，addLast 会将 handlerAdded 回调延迟到注册后执行 |
-| [3] | `setChannelOptions` | 设置 TCP 选项（如 `SO_KEEPALIVE=true`），直接调用 JDK Socket API |
+| [3] | `setChannelOptions` | 设置 TCP 选项（如 `SO_KEEPALIVE=true`）。⚠️ **注意**：有 try-catch，若设置失败会 `forceClose(child, cause)` 并 `return`，不会继续执行后续步骤 |
 | [6] | `childGroup.register(child)` | 🔥🔥🔥 **核心！** 从 Worker EventLoopGroup 中选一个 EventLoop，将子 Channel 注册上去。这是 Reactor 模式中 Main Reactor → Sub Reactor 的分发点 |
 | [7] | `forceClose(child, cause)` | 注册失败时强制关闭子 Channel，防止 FD 泄漏 |
 | [8] | `setAutoRead(false)` + `schedule` | 🔥 **防止 too many open files 忙循环**：当 accept 出现异常时，暂停 1 秒接受新连接，让系统有时间恢复 |
@@ -392,6 +397,8 @@ private void register0(ChannelPromise promise) {
             if (isActive()) {                          // [3] 🔥 NioSocketChannel 此时 isActive()=true！
                 if (firstRegistration) {
                     pipeline.fireChannelActive();      // [4] 🔥 触发 channelActive！
+                } else if (config().isAutoRead()) {
+                    beginRead();                       // [4b] 重新注册时（deregister后再register），autoRead=true 则重新注册 OP_READ
                 }
             }
         }
@@ -403,6 +410,7 @@ private void register0(ChannelPromise promise) {
 **关键差异**：
 - **ServerSocketChannel** 注册时：`isActive()=false`（还没 bind），不触发 `channelActive`
 - **NioSocketChannel** 注册时：`isActive()=true`（已连接），**立即触发 `channelActive`**！
+- **重新注册时**（Channel deregister 后再 register）：`firstRegistration=false`，不触发 `channelActive`，但若 `autoRead=true` 会调用 `beginRead()` 重新注册 `OP_READ`，确保数据继续被读取
 
 `channelActive` 触发后，`HeadContext.channelActive()` 会调用 `beginRead()`，注册 `OP_READ` 到 Selector，从此开始监听数据到来。
 
@@ -549,7 +557,7 @@ public final void read() {
 | [12] | `byteBuf = null` | 置 null 防止 finally 中重复 release（ByteBuf 已经交给 Pipeline 处理了） |
 | [13] | `continueReading()` | 🔥 **核心判断**：`autoRead && totalMessages < 16 && lastBytesRead == attemptedBytesRead`（读满了才继续） |
 | [14] | `allocHandle.readComplete()` | 通知 AdaptiveCalculator 本轮总读取量，用于调整下次 ByteBuf 大小 |
-| [16] | `closeOnRead(pipeline)` | 触发 `pipeline.fireChannelReadComplete()` + `pipeline.fireChannelInactive()` + `deregister()` |
+| [16] | `closeOnRead(pipeline)` | 🔥 **注意**：`fireChannelReadComplete()` 在 [15] 处已经触发，`closeOnRead()` 本身不再触发它。默认（`allowHalfClosure=false`）调用 `close(voidPromise())` 关闭连接；若 `allowHalfClosure=true` 则调用 `shutdownInput()` + `fireUserEventTriggered(ChannelInputShutdownEvent)` 实现半关闭 |
 
 ### 6.3 NioByteUnsafe vs NioMessageUnsafe 的关键差异
 
@@ -687,7 +695,13 @@ public void readComplete() {
 1. **`lastBytesRead` 中的 record**：如果单次读取就读满了 ByteBuf，说明数据量大，立即触发扩容判断
 2. **`readComplete` 中的 record**：用本轮总读取量做最终判断，主要用于缩容
 
-### 7.5 自适应过程示例
+### 7.5 自适应过程示例（真实运行数据验证）
+
+> 以下数据通过运行 `AdaptiveCalculator` 逻辑验证，**非推断**（Skill #16）：
+> ```
+> SIZE_TABLE: [33]=2048, [34]=4096, [35]=8192, [36]=16384, [37]=32768, [38]=65536
+> INDEX_INCREMENT=4, INDEX_DECREMENT=1, maximum=65536 → maxIndex=38
+> ```
 
 ```mermaid
 graph LR
@@ -695,16 +709,16 @@ graph LR
         A["nextSize = 2048\nindex = 33"]
     end
     subgraph "第1轮：读了2048字节（读满）"
-        B["record(2048)\n2048 >= 2048 → 扩容\nindex += 4 → 37\nnextSize = 4096"]
+        B["record(2048)\n2048 >= nextSize(2048) → 扩容\nindex += 4 → 37\nnextSize = SIZE_TABLE[37] = 32768"]
     end
-    subgraph "第2轮：读了4096字节（读满）"
-        C["record(4096)\n4096 >= 4096 → 扩容\nindex += 4 → 41\nnextSize = 8192"]
+    subgraph "第2轮：读了32768字节（读满）"
+        C["record(32768)\n32768 >= nextSize(32768) → 扩容\nindex += 4 → 38（达到maxIndex）\nnextSize = min(SIZE_TABLE[38], 65536) = 65536"]
     end
     subgraph "第3轮：读了1024字节（未满）"
-        D["record(1024)\n1024 <= SIZE_TABLE[40]=4096 → decreaseNow=true\nnextSize 不变 = 8192"]
+        D["record(1024)\n1024 <= SIZE_TABLE[37]=16384 → decreaseNow=true\nnextSize 不变 = 65536"]
     end
     subgraph "第4轮：读了1024字节（未满）"
-        E["record(1024)\n连续两次 → 缩容\nindex -= 1 → 40\nnextSize = 4096"]
+        E["record(1024)\n连续两次 → 缩容\nindex -= 1 → 37\nnextSize = SIZE_TABLE[37] = 32768"]
     end
 
     A --> B --> C --> D --> E
@@ -714,6 +728,8 @@ graph LR
     style D fill:#fff9c4
     style E fill:#c8e6c9
 ```
+
+> ⚠️ **常见误解**：很多人以为 `+4档` 是 2048→4096→8192 这样的小步扩容，实际上 `SIZE_TABLE` 在 512 以上是**倍增**的（512, 1024, 2048, 4096, 8192, 16384, 32768, 65536），所以 `index=33` 扩容 `+4档` 直接跳到 `index=37`，即 **2048 → 32768**，是 **16倍**的跳跃！这正是"激进扩容"的体现。
 
 ---
 
@@ -928,14 +944,17 @@ public void record(int size) {
 }
 ```
 
-**预期输出**（发送 4096 字节数据时）：
+**真实输出**（发送超过 2048 字节数据，ByteBuf 被读满时）：
 ```
+// lastBytesRead 中触发（单次读满）
 [VERIFY-ADAPTIVE] size=2048 nextSize(before)=2048 index=33 decreaseNow=false
-[VERIFY-ADAPTIVE] nextSize(after)=4096   // 读满了，扩容 +4档
+[VERIFY-ADAPTIVE] nextSize(after)=32768  // 扩容 +4档！2048→32768（16倍跳跃）
 
-[VERIFY-ADAPTIVE] size=4096 nextSize(before)=4096 index=37 decreaseNow=false
-[VERIFY-ADAPTIVE] nextSize(after)=8192   // 再次读满，继续扩容
+// readComplete 中触发（totalBytesRead=2048）
+[VERIFY-ADAPTIVE] size=2048 nextSize(before)=32768 index=37 decreaseNow=false
+[VERIFY-ADAPTIVE] nextSize(after)=32768  // 2048 < 32768 且 2048 > SIZE_TABLE[36]=16384，不变
 ```
+> 以上输出通过实际运行 `AdaptiveCalculator` 逻辑验证（Skill #16）。
 
 > **注意**：以上打印代码仅用于验证，生产环境不要保留。验证完成后删除。
 
@@ -976,7 +995,7 @@ public void record(int size) {
 **Q5**：`AdaptiveRecvByteBufAllocator` 的扩容和缩容策略有什么不同？为什么？🔥🔥
 
 **A**：
-- **扩容**：激进，一次 +4 档（如 2048 → 4096 → 8192 → 16384 → 32768）。原因：快速适应突发大流量，避免多次小 ByteBuf 读取导致多次系统调用。
+- **扩容**：激进，一次 +4 档。由于 `SIZE_TABLE` 在 512 以上是倍增序列（512, 1024, 2048, 4096, 8192, 16384, 32768, 65536），+4 档意味着**跳跃式扩容**：如 2048（index=33）→ 32768（index=37），直接 16 倍！原因：快速适应突发大流量，避免多次小 ByteBuf 读取导致多次系统调用。
 - **缩容**：保守，一次 -1 档，且需要**连续两次**读取量不满才缩容。原因：避免"抖动"——如果数据量在阈值附近波动，激进缩容会导致频繁扩容/缩容，浪费 CPU。
 
 ---
