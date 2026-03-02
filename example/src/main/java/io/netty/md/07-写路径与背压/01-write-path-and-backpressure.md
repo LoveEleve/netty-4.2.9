@@ -58,6 +58,8 @@ public final class ChannelOutboundBuffer {
     static final int CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD =
             SystemPropertyUtil.getInt("io.netty.transport.outboundBufferEntrySizeOverhead", 96);
 
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(ChannelOutboundBuffer.class);
+
     // 线程本地的 ByteBuffer[] 数组，用于 nioBuffers() 的 gathering write
     private static final FastThreadLocal<ByteBuffer[]> NIO_BUFFERS = new FastThreadLocal<ByteBuffer[]>() {
         @Override
@@ -315,13 +317,20 @@ public final class WriteBufferWaterMark {
     private final int low;
     private final int high;
 
+    // 用户使用的公开构造函数（会做参数校验）
+    public WriteBufferWaterMark(int low, int high) {
+        this(low, high, true);
+    }
+
+    // package-private 构造函数（用于创建 DEFAULT 常量，跳过校验）
     WriteBufferWaterMark(int low, int high, boolean validate) {
         if (validate) {
             checkPositiveOrZero(low, "low");
             if (high < low) {
                 throw new IllegalArgumentException(
                         "write buffer's high water mark cannot be less than " +
-                                " low water mark (" + low + "): " + high);
+                                " low water mark (" + low + "): " +
+                                high);
             }
         }
         this.low = low;
@@ -551,6 +560,8 @@ protected void doWrite(ChannelOutboundBuffer in) throws Exception {
         switch (nioBufferCnt) {
             case 0:
                 // [5] 非 ByteBuf 消息（如 FileRegion），走 doWrite0
+                // doWrite0 返回值：0=空消息，1=写了一次，WRITE_STATUS_SNDBUF_FULL(Integer.MAX_VALUE)=Socket 缓冲区满
+                // writeSpinCount -= Integer.MAX_VALUE 会变为负数，触发 incompleteWrite(true)
                 writeSpinCount -= doWrite0(in);
                 break;
             case 1: {
@@ -619,7 +630,9 @@ protected final void incompleteWrite(boolean setOpWrite) {
         // [1] Socket 缓冲区满：注册 OP_WRITE，等待 Selector 通知
         setOpWrite();
     } else {
-        // [2] spin 用完但 Socket 未满：清除 OP_WRITE（Socket 仍可写，不需要等待）
+        // [2] spin 用完但 Socket 未满：清除 OP_WRITE
+        // 注意：此时可能已经注册了 OP_WRITE（被 NIO 唤醒后用完了 spin），
+        // 但 Socket 仍然可写，不需要再等待 Selector 通知，所以先清除 OP_WRITE
         clearOpWrite();
         // [3] 提交 flushTask 到 EventLoop，让其他任务有机会执行
         eventLoop().execute(flushTask);
@@ -1028,7 +1041,7 @@ pipeline.addLast(new ChannelInboundHandlerAdapter() {
 
 ### ④ 字段/顺序与源码一致
 
-- `ChannelOutboundBuffer` 字段顺序：`channel, flushedEntry, unflushedEntry, tailEntry, flushed, nioBufferCount, nioBufferSize, inFail, TOTAL_PENDING_SIZE_UPDATER, totalPendingSize, UNWRITABLE_UPDATER, unwritable, fireChannelWritabilityChangedTask` ✅
+- `ChannelOutboundBuffer` 字段顺序：`CHANNEL_OUTBOUND_BUFFER_ENTRY_OVERHEAD, logger, NIO_BUFFERS, channel, flushedEntry, unflushedEntry, tailEntry, flushed, nioBufferCount, nioBufferSize, inFail, TOTAL_PENDING_SIZE_UPDATER, totalPendingSize, UNWRITABLE_UPDATER, unwritable, fireChannelWritabilityChangedTask` ✅
 - `Entry` 字段顺序：`handle, next, msg, bufs, buf, promise, progress, total, pendingSize, count, cancelled` ✅
 - `WriteBufferWaterMark` 字段：`DEFAULT_LOW_WATER_MARK=32*1024, DEFAULT_HIGH_WATER_MARK=64*1024, DEFAULT, low, high` ✅
 
