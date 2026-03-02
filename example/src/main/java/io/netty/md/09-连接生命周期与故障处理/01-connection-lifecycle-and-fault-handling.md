@@ -40,42 +40,23 @@ Netty 的解法：
 ### 2.1 完整状态机
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Created: new NioSocketChannel()
+flowchart LR
+    S(["★ 起点"]) --> Created
+    Created(["**Created**<br/>isOpen=true<br/>isRegistered=false<br/>isActive=false"])
+    Created -->|"register(EventLoop)<br/>fireChannelRegistered()"| Registered
+    Registered(["**Registered**<br/>isOpen=true<br/>isRegistered=true<br/>isActive=false"])
+    Registered -->|"connect()成功 / bind()+accept()<br/>fireChannelActive()"| Active
+    Active(["**Active**<br/>isOpen=true<br/>isRegistered=true<br/>isActive=true"])
+    Active -->|"close() / 对端关闭<br/>fireChannelInactive()"| Inactive
+    Inactive(["**Inactive**<br/>isOpen=false<br/>isRegistered=true<br/>isActive=false"])
+    Inactive -->|"deregister()<br/>fireChannelUnregistered()"| Deregistered
+    Deregistered(["**Deregistered**"]) --> E(["★ 终点"])
 
-    Created --> Registered: register(EventLoop)\nfireChannelRegistered()
-
-    Registered --> Active: connect() 成功\n或 bind() + accept()\nfireChannelActive()
-
-    Active --> Inactive: close() / 对端关闭\nfireChannelInactive()
-
-    Inactive --> Deregistered: deregister()\nfireChannelUnregistered()
-
-    Deregistered --> [*]
-
-    note right of Created
-        isOpen()=true
-        isRegistered()=false
-        isActive()=false
-    end note
-
-    note right of Registered
-        isOpen()=true
-        isRegistered()=true
-        isActive()=false（未连接）
-    end note
-
-    note right of Active
-        isOpen()=true
-        isRegistered()=true
-        isActive()=true
-    end note
-
-    note right of Inactive
-        isOpen()=false（已关闭）
-        isRegistered()=true（还未注销）
-        isActive()=false
-    end note
+    style Created fill:#e3f2fd
+    style Registered fill:#e8f5e9
+    style Active fill:#c8e6c9
+    style Inactive fill:#ffcdd2
+    style Deregistered fill:#f5f5f5
 ```
 
 ### 2.2 关键状态判断方法
@@ -313,18 +294,18 @@ protected void close(final ChannelPromise promise, final Throwable cause,
 
 ```mermaid
 flowchart TD
-    A["ctx.close() / channel.close()"] --> B{closeInitiated?}
-    B -->|是| C{closeFuture.isDone()?}
+    A["ctx.close() / channel.close()"] --> B{"closeInitiated?"}
+    B -->|是| C{"closeFuture.isDone()?"}
     C -->|是| D["safeSetSuccess(promise)"]
     C -->|否| E["注册 Listener 等待"]
-    B -->|否| F["closeInitiated = true\noutboundBuffer = null"]
-    F --> G{prepareToClose()\n返回 closeExecutor?}
-    G -->|是 SO_LINGER| H["closeExecutor 线程:\ndoClose0(promise)"]
-    H --> I["invokeLater:\nfailFlushed + close\nfireChannelInactive"]
-    G -->|否| J["EventLoop 线程:\ndoClose0(promise)"]
+    B -->|否| F["closeInitiated = true<br/>outboundBuffer = null"]
+    F --> G{"prepareToClose()<br/>返回 closeExecutor?"}
+    G -->|是 SO_LINGER| H["closeExecutor 线程:<br/>doClose0(promise)"]
+    H --> I["invokeLater:<br/>failFlushed + close<br/>fireChannelInactive"]
+    G -->|否| J["EventLoop 线程:<br/>doClose0(promise)"]
     J --> K["failFlushed + close"]
-    K --> L{inFlush0?}
-    L -->|是| M["invokeLater:\nfireChannelInactive"]
+    K --> L{"inFlush0?"}
+    L -->|是| M["invokeLater:<br/>fireChannelInactive"]
     L -->|否| N["直接 fireChannelInactive"]
     I --> O["deregister()"]
     M --> O

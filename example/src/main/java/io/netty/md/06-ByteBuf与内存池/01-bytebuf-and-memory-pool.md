@@ -1,4 +1,15 @@
-# 06-01 ByteBuf 与内存池深度分析
+# 06-01 ByteBuf 基础、引用计数与泄漏检测
+
+> **模块导读**：本篇是「06-ByteBuf与内存池」系列的第1篇，聚焦 ByteBuf 的数据结构、双指针操作语义、引用计数机制、分配器入口和泄漏检测。
+> 内存池的核心算法（SizeClasses、PoolChunk、PoolSubpage、PoolThreadCache、Recycler）在后续4篇中深入展开。
+>
+> | 篇号 | 文件 | 内容 |
+> |------|------|------|
+> | 01 | `01-bytebuf-and-memory-pool.md` | ByteBuf基础、双指针、引用计数、分配器入口、泄漏检测 ← **本篇** |
+> | 02 | `02-size-classes.md` | SizeClasses：76个sizeIdx推导、size分级体系、log2Group/log2Delta |
+> | 03 | `03-pool-chunk-run-allocation.md` | PoolChunk：完全二叉树+runsAvail跳表、handle编码、run分配算法 |
+> | 04 | `04-pool-subpage.md` | PoolSubpage：bitmap分配、双向链表、smallSubpagePools |
+> | 05 | `05-pool-thread-cache-and-recycler.md` | PoolThreadCache：环形数组缓存；Recycler：Stack+WeakOrderQueue跨线程回收 |
 
 ## 一、解决什么问题
 
@@ -46,12 +57,12 @@ Netty 的 `ByteBuf` 用**双指针设计**彻底解决了这三个问题：
 - **动态扩容**：写入时自动调用 `ensureWritable()`，按 2 倍增长（超过 4MiB 后按 4MiB 步进）
 - **引用计数**：`retain()`/`release()` 管理生命周期，支持池化复用
 
-### 1.3 要回答的 6 个核心问题
+### 1.3 本篇要回答的 6 个核心问题
 
 1. `ByteBuf` 的类层次是什么？堆内/堆外/池化/非池化如何组合？
 2. `readerIndex`/`writerIndex` 的操作语义是什么？`discardReadBytes()` 做了什么？
 3. 引用计数的 CAS 实现原理是什么？为什么有三条路径？
-4. `PooledByteBufAllocator` 的分配流程是什么？Arena/Chunk/Page/Subpage 的层次关系？
+4. `PooledByteBufAllocator` 的分配入口是什么？Arena 如何选择？（内存池算法细节见02-05篇）
 5. `ResourceLeakDetector` 的四个等级有什么区别？如何检测泄漏？
 6. 什么时候最容易发生内存泄漏？
 
