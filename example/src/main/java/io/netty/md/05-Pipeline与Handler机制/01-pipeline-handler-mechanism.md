@@ -272,7 +272,8 @@ private ChannelPipeline internalAdd(EventExecutorGroup group, String name,
 
         EventExecutor executor = newCtx.executor();
         if (!executor.inEventLoop()) {             // [7] 当前线程不是 Handler 的 EventLoop 线程
-            callHandlerAddedInEventLoop(newCtx, executor); // 提交任务到 EventLoop 执行
+            callHandlerAddedInEventLoop(newCtx, executor);
+            // ↑ 内部先调用 newCtx.setAddPending()，再提交任务到 EventLoop 执行
             return this;
         }
     }
@@ -446,37 +447,39 @@ MASK_ALL_OUTBOUND  = 130561 (0x1FE01)
 ```java
 private static int mask0(Class<? extends ChannelHandler> handlerType) {
     int mask = MASK_EXCEPTION_CAUGHT;  // [1] 默认包含 EXCEPTION_CAUGHT
+    try {
+        if (ChannelInboundHandler.class.isAssignableFrom(handlerType)) {
+            mask |= MASK_ALL_INBOUND;      // [2] Inbound Handler：先全部置位
 
-    if (ChannelInboundHandler.class.isAssignableFrom(handlerType)) {
-        mask |= MASK_ALL_INBOUND;      // [2] Inbound Handler：先全部置位
+            // [3] 逐个检查是否有 @Skip 注解，有则清除对应 bit
+            if (isSkippable(handlerType, "channelRegistered", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_REGISTERED;
+            if (isSkippable(handlerType, "channelUnregistered", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_UNREGISTERED;
+            if (isSkippable(handlerType, "channelActive", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_ACTIVE;
+            if (isSkippable(handlerType, "channelInactive", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_INACTIVE;
+            if (isSkippable(handlerType, "channelRead", ChannelHandlerContext.class, Object.class))
+                mask &= ~MASK_CHANNEL_READ;
+            if (isSkippable(handlerType, "channelReadComplete", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_READ_COMPLETE;
+            if (isSkippable(handlerType, "channelWritabilityChanged", ChannelHandlerContext.class))
+                mask &= ~MASK_CHANNEL_WRITABILITY_CHANGED;
+            if (isSkippable(handlerType, "userEventTriggered", ChannelHandlerContext.class, Object.class))
+                mask &= ~MASK_USER_EVENT_TRIGGERED;
+        }
 
-        // [3] 逐个检查是否有 @Skip 注解，有则清除对应 bit
-        if (isSkippable(handlerType, "channelRegistered", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_REGISTERED;
-        if (isSkippable(handlerType, "channelUnregistered", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_UNREGISTERED;
-        if (isSkippable(handlerType, "channelActive", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_ACTIVE;
-        if (isSkippable(handlerType, "channelInactive", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_INACTIVE;
-        if (isSkippable(handlerType, "channelRead", ChannelHandlerContext.class, Object.class))
-            mask &= ~MASK_CHANNEL_READ;
-        if (isSkippable(handlerType, "channelReadComplete", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_READ_COMPLETE;
-        if (isSkippable(handlerType, "channelWritabilityChanged", ChannelHandlerContext.class))
-            mask &= ~MASK_CHANNEL_WRITABILITY_CHANGED;
-        if (isSkippable(handlerType, "userEventTriggered", ChannelHandlerContext.class, Object.class))
-            mask &= ~MASK_USER_EVENT_TRIGGERED;
+        if (ChannelOutboundHandler.class.isAssignableFrom(handlerType)) {
+            mask |= MASK_ALL_OUTBOUND;     // [4] Outbound Handler：先全部置位
+            // [5] 逐个检查 @Skip...（bind/connect/disconnect/close/deregister/read/write/flush）
+        }
+
+        if (isSkippable(handlerType, "exceptionCaught", ChannelHandlerContext.class, Throwable.class))
+            mask &= ~MASK_EXCEPTION_CAUGHT; // [6] 检查 exceptionCaught 是否可跳过
+    } catch (Exception e) {
+        PlatformDependent.throwException(e); // [7] 理论上不会到达这里
     }
-
-    if (ChannelOutboundHandler.class.isAssignableFrom(handlerType)) {
-        mask |= MASK_ALL_OUTBOUND;     // [4] Outbound Handler：先全部置位
-        // [5] 逐个检查 @Skip...（同上）
-    }
-
-    if (isSkippable(handlerType, "exceptionCaught", ChannelHandlerContext.class, Throwable.class))
-        mask &= ~MASK_EXCEPTION_CAUGHT; // [6] 检查 exceptionCaught 是否可跳过
-
     return mask;
 }
 ```
@@ -490,7 +493,9 @@ private static int mask0(Class<? extends ChannelHandler> handlerType) {
   包含 MASK_CHANNEL_ACTIVE? false  ← 其他事件都被跳过
 ```
 
-**缓存机制**：`executionMask` 通过 `FastThreadLocal<WeakHashMap<Class, Integer>>` 缓存，同一 Handler 类型只计算一次（反射开销只在第一次）。
+> ⚠️ 注意：`0x20 = 32`，不含 `MASK_EXCEPTION_CAUGHT(bit0)`。因为只覆盖了 `channelRead`，`exceptionCaught` 方法仍有 `@Skip`，所以 bit0 也被清掉。
+
+**缓存机制**：`executionMask` 通过 `FastThreadLocal<Map<Class<? extends ChannelHandler>, Integer>>` 缓存（内部实现为 `WeakHashMap`），同一 Handler 类型只计算一次（反射开销只在第一次）。
 
 ### 5.4 skipContext() —— 跳过判断
 
@@ -929,9 +934,9 @@ private AbstractChannelHandlerContext findContextInbound(int mask) {
 **预期输出**（Pipeline: Head → OutboundEncoder → InboundDecoder → BusinessHandler → Tail）：
 ```
 [VERIFY] findContextInbound: checking OutboundEncoder#0 executionMask=0x1FE01 mask=0x20 skip=true
-[VERIFY] findContextInbound: checking InboundDecoder#0 executionMask=0x21 mask=0x20 skip=false
+[VERIFY] findContextInbound: checking InboundDecoder#0 executionMask=0x20 mask=0x20 skip=false
 ```
-→ 确认 OutboundEncoder 被跳过，InboundDecoder 被选中
+→ 确认 OutboundEncoder 被跳过，InboundDecoder 被选中（InboundDecoder 只覆盖 channelRead，executionMask=0x20）
 
 ### 验证方案2：验证 PendingHandlerCallback 执行时机
 
@@ -1038,7 +1043,7 @@ MASK_ONLY_INBOUND  = 510  (0x01FE)  ← 真实运行输出 ✅
 MASK_ALL_INBOUND   = 511  (0x01FF)  ← 真实运行输出 ✅
 MASK_ONLY_OUTBOUND = 130560 (0x1FE00) ← 真实运行输出 ✅
 MASK_ALL_OUTBOUND  = 130561 (0x1FE01) ← 真实运行输出 ✅
-只覆盖 channelRead 的 InboundHandler executionMask = 32 (0x0020) ← 真实运行输出 ✅
+只覆盖 channelRead 的 InboundHandler executionMask = 32 (0x0020) ← 真实运行输出 ✅（注：0x20，不含 EXCEPTION_CAUGHT bit）
 纯 OutboundHandler 对 channelRead 事件会被 skip? true ← 真实运行输出 ✅
 纯 InboundHandler 对 write 事件会被 skip? true ← 真实运行输出 ✅
 ```
@@ -1068,6 +1073,8 @@ MASK_ALL_OUTBOUND  = 130561 (0x1FE01) ← 真实运行输出 ✅
 **Q：`fireChannelRead` 中为什么有三个 handler 类型判断（headContext / ChannelDuplexHandler / ChannelInboundHandler）？**
 
 A：源码注释写明 "DON'T CHANGE - Duplex handlers implements both out/in interfaces causing a scalability issue see JDK-8180450"。JDK-8180450 是一个 JVM 接口调用优化的 bug：当一个类实现了两个接口，且通过接口调用时，JIT 无法做内联优化（megamorphic call site）。通过显式 instanceof 判断并强转，可以让 JIT 识别为 bimorphic 或 monomorphic call site，从而做内联优化，提升热路径性能。
+
+> ⚠️ 注意：`fireChannelRead` 用的是 `ChannelDuplexHandler`（因为 DuplexHandler 同时实现了 in/out 接口），而 `fireChannelRegistered`、`fireChannelActive` 等其他 inbound 事件用的是 `ChannelInboundHandlerAdapter`（不涉及 DuplexHandler 的双接口问题）。每个 fire 方法的三路判断略有不同，需要具体查看对应方法的源码。
 
 **Q：`HeadContext` 的 `exceptionCaught` 为什么不是空实现，而是 `ctx.fireExceptionCaught(cause)`？**
 
