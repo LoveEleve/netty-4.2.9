@@ -545,7 +545,7 @@ public final void read() {
 
 | 标号 | 代码 | 深度分析 |
 |------|------|---------|
-| [1] | `shouldBreakReadReady(config)` | 检查 `inputClosedSeenErrorOnRead`，如果输入已关闭且之前读取时遇到错误，则跳过本次读取 |
+| [1] | `shouldBreakReadReady(config)` | 🔥 **注意**：条件是 `isInputShutdown0() && (inputClosedSeenErrorOnRead \|\| !isAllowHalfClosure(config))`。即：输入已关闭，**且**（之前读取时遇到过错误 **或** `allowHalfClosure=false`（默认））。默认情况下只要输入关闭就会 break，不需要 `inputClosedSeenErrorOnRead=true` |
 | [2] | `config.getAllocator()` | 获取 `ByteBufAllocator`（默认 `PooledByteBufAllocator`） |
 | [3] | `recvBufAllocHandle()` | 懒初始化 `AdaptiveRecvByteBufAllocator.HandleImpl` |
 | [4] | `allocHandle.reset(config)` | 重置 `totalMessages=0, totalBytesRead=0`，读取 `maxMessagesPerRead=16` |
@@ -557,7 +557,10 @@ public final void read() {
 | [12] | `byteBuf = null` | 置 null 防止 finally 中重复 release（ByteBuf 已经交给 Pipeline 处理了） |
 | [13] | `continueReading()` | 🔥 **核心判断**：`autoRead && totalMessages < 16 && lastBytesRead == attemptedBytesRead`（读满了才继续） |
 | [14] | `allocHandle.readComplete()` | 通知 AdaptiveCalculator 本轮总读取量，用于调整下次 ByteBuf 大小 |
+| [15] | `fireChannelReadComplete()` | 通知 Pipeline 本轮读取完成，用户可在此做批量 flush 等操作 |
 | [16] | `closeOnRead(pipeline)` | 🔥 **注意**：`fireChannelReadComplete()` 在 [15] 处已经触发，`closeOnRead()` 本身不再触发它。有三个分支：① 输入未关闭 + `allowHalfClosure=false`（默认）→ `close(voidPromise())` 关闭连接；② 输入未关闭 + `allowHalfClosure=true` → `shutdownInput()` + `fireUserEventTriggered(ChannelInputShutdownEvent)` 半关闭；③ 输入已关闭（`isInputShutdown0()=true`）且首次 → `inputClosedSeenErrorOnRead=true` + `fireUserEventTriggered(ChannelInputShutdownReadComplete)` |
+| [17] | `handleReadException(...)` | 🔥 **异常处理细节**：① 若 `byteBuf != null && byteBuf.isReadable()`，先 `fireChannelRead(byteBuf)` 把已读数据交给 Pipeline；② 若 `byteBuf` 为空则 `release()`；③ 调用 `readComplete()` + `fireChannelReadComplete()` + `fireExceptionCaught(cause)`；④ 若 `close=true` 或 `cause instanceof OutOfMemoryError/IOException` 则调用 `closeOnRead(pipeline)` |
+| [18] | `removeReadOp()` | 若 `autoRead=false` 且没有 pending 的 read 请求，从 Selector 移除 `OP_READ`，停止读取 |
 
 ### 6.3 NioByteUnsafe vs NioMessageUnsafe 的关键差异
 
@@ -638,7 +641,7 @@ SIZE_TABLE 的结构：
 ```java
 // AdaptiveCalculator.record()
 public void record(int size) {
-    // 缩容判断：实际读取量 <= SIZE_TABLE[index - 1]（比当前档位小一档）
+    // 缩容判断：实际读取量 <= SIZE_TABLE[max(0, index-1)]（比当前档位小一档；max(0,...)防止index=0时越界）
     if (size <= SIZE_TABLE[max(0, index - INDEX_DECREMENT)]) {
         if (decreaseNow) {
             // 连续两次不满 → 缩容（-1档）
@@ -666,7 +669,7 @@ public void record(int size) {
 | 操作 | 触发条件 | 步长 | 策略 |
 |------|---------|------|------|
 | **扩容** | 读取量 >= 当前预测大小（读满了） | +4 档 | **激进**：快速扩容，避免多次系统调用 |
-| **缩容** | 读取量 <= 上一档大小，且**连续两次** | -1 档 | **保守**：避免频繁缩容后又扩容（抖动） |
+| **缩容** | 读取量 <= `SIZE_TABLE[max(0, index-1)]`（比当前档位小一档），且**连续两次** | -1 档 | **保守**：避免频繁缩容后又扩容（抖动）；`max(0,...)` 防止 index=0 时数组越界 |
 | **不变** | 介于两者之间 | 0 | 保持稳定 |
 
 > 🔥 **面试高频**：为什么扩容激进（+4档）而缩容保守（-1档，且需要连续两次）？
