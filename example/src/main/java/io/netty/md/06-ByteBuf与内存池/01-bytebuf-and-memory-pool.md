@@ -154,7 +154,7 @@ public abstract class AbstractReferenceCountedByteBuf extends AbstractByteBuf {
 
 ```java
 abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
-    private final Recycler.Handle<PooledByteBuf<T>> recyclerHandle; // [1] 对象池句柄（用于回收 PooledByteBuf 对象本身）
+    private final EnhancedHandle<PooledByteBuf<T>> recyclerHandle; // [1] 对象池句柄（用于回收 PooledByteBuf 对象本身）
 
     protected PoolChunk<T> chunk;    // [2] 所属 Chunk（4MiB 的大块内存）
     protected long handle;           // [3] 在 Chunk 中的位置句柄（编码了 page/subpage 信息）
@@ -741,9 +741,11 @@ private static final class DefaultResourceLeak<T>
     DefaultResourceLeak(Object referent, ReferenceQueue<Object> refQueue,
                         Set<DefaultResourceLeak<?>> allLeaks, Object initialHint) {
         super(referent, refQueue);  // [3] 弱引用，referent 被 GC 时加入 refQueue
-        trackedHash = System.identityHashCode(referent);
-        allLeaks.add(this);         // [4] 加入活跃集合
-        // [5] 记录创建时的栈帧
+        assert referent != null;
+        this.allLeaks = allLeaks;   // [4] 保存 allLeaks 引用（注意：不持有 referent 引用，避免阻止 GC）
+        trackedHash = System.identityHashCode(referent); // [5] 记录 hash，用于 close() 时校验
+        allLeaks.add(this);         // [6] 加入活跃集合
+        // [7] 记录创建时的栈帧
         headUpdater.set(this, initialHint == null ?
                 new TraceRecord(TraceRecord.BOTTOM) : new TraceRecord(TraceRecord.BOTTOM, initialHint));
     }
