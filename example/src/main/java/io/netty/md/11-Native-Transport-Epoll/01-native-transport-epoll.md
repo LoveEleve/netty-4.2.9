@@ -186,6 +186,14 @@ public final class Epoll {
                 }
             }
         }
+        if (cause != null) {
+            InternalLogger logger = InternalLoggerFactory.getInstance(Epoll.class);
+            if (logger.isTraceEnabled()) {
+                logger.debug("Epoll support is not available", cause);
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("Epoll support is not available: {}", cause.getMessage());
+            }
+        }
         UNAVAILABILITY_CAUSE = cause;
     }
 
@@ -379,6 +387,13 @@ private final class DefaultEpollIoRegistration implements IoRegistration {
     private final AtomicBoolean canceled = new AtomicBoolean();
     final EpollIoHandle handle;
 
+    // 返回 NativeArrays（供 Channel 在 doWriteOrSendBytes 中使用 IovArray）
+    @SuppressWarnings("unchecked")
+    @Override
+    public <T> T attachment() {
+        return (T) nativeArrays;
+    }
+
     // 更新 epoll 监听的事件集合（epoll_ctl EPOLL_CTL_MOD）
     @Override
     public long submit(IoOps ops) {
@@ -429,10 +444,24 @@ private final class DefaultEpollIoRegistration implements IoRegistration {
             handle.unregistered();
         }
     }
+
+    // prepareToDestroy() 中调用：先 cancel 注册，再关闭 Channel
+    void close() {
+        try {
+            cancel();
+        } catch (Exception e) {
+            logger.debug("Exception during canceling " + this, e);
+        }
+        try {
+            handle.close();
+        } catch (Exception e) {
+            logger.debug("Exception during closing " + handle, e);
+        }
+    }
 }
 ```
 
-<!-- 核对记录：已对照 EpollIoHandler.java DefaultEpollIoRegistration 内部类（第195-265行），差异：无 -->
+<!-- 核对记录：已对照 EpollIoHandler.java DefaultEpollIoRegistration 内部类（第195-265行），差异：补充了attachment()方法和close()方法 -->
 
 ---
 
@@ -1147,4 +1176,4 @@ new EpollEventLoopGroup(nThreads, threadFactory, maxEventsAtOnce);
 - [x] ⑤ 边界/保护逻辑：`register()` 中的 `assert old == null || !old.isValid()` 已体现；`cancel0()` 中的 fd 复用检测已体现
 - [x] ⑥ 源码逐字对照：所有源码块均已通过工具调用核对，见各方法后的核对记录注释
 
-<!-- 核对记录（全局扫描第2轮）：已对照 EpollIoHandler.java（576行）、AbstractEpollChannel.java（850行）逐字核对，确认：①EpollIoHandler字段顺序正确（prevDeadlineNanos是第一个实例字段，在epollFd之前）；②AbstractEpollChannel字段包含requestedRemoteAddress；③其余所有源码块（Epoll.java/EpollIoOps.java/EpollEventArray.java/AbstractEpollServerChannel.java/EpollServerSocketChannel.java/EpollSocketChannel.java/EpollMode.java/Native.java）均与源码逐字核对无差异 -->
+<!-- 核对记录（全局扫描第3轮）：已对照 EpollIoHandler.java（576行）、AbstractEpollChannel.java（850行）、Epoll.java（128行）、EpollIoOps.java（210行）逐字核对，发现并修正3处差异：①Epoll.java静态初始化块补充日志打印段（cause!=null时打印debug/trace日志）；②DefaultEpollIoRegistration补充attachment()方法（返回nativeArrays）；③DefaultEpollIoRegistration补充close()方法（cancel+handle.close()）。其余所有源码块均与源码逐字核对无差异 -->
