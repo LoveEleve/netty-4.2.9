@@ -754,7 +754,11 @@ public void addFlush() {
         if (flushedEntry == null) { flushedEntry = entry; }
         do {
             flushed++;
-            entry.promise.setUncancellable();  // flush 后不可取消
+            if (!entry.promise.setUncancellable()) {
+                // 已被取消 → 释放内存并扣减 pendingSize
+                int pending = entry.cancel();
+                decrementPendingOutboundBytes(pending, false, true);
+            }
             entry = entry.next;
         } while (entry != null);
         unflushedEntry = null;  // 全部标记为 flushed
@@ -808,8 +812,9 @@ static final class Entry {
     long progress;        // 当前写入进度
     long total;           // 消息总大小
     int pendingSize;      // msg大小 + Entry开销（96字节）
-    int count;            // ByteBuffer 数量缓存
+    int count = -1;       // ByteBuffer 数量缓存（-1 表示未初始化）
     boolean cancelled;    // 是否被取消
+    private final EnhancedHandle<Entry> handle;  // Recycler 回收句柄
 }
 ```
 
@@ -1006,6 +1011,72 @@ graph TB
 **Q7**：Channel 构造时创建了哪些核心对象？🔥
 **A**：（Skill #13 父类构造链）从 AbstractChannel 开始：`ChannelId`（全局唯一标识）、`Unsafe`（底层 IO，子类多态创建）、`DefaultChannelPipeline`（事件管道，内含 HeadContext/TailContext 双向链表）、`CloseFuture`（关闭通知）。AbstractNioChannel 增加：保存 JDK `SelectableChannel` 并设为非阻塞模式。最终子类增加：`ChannelConfig`（配置）。
 
+### 11.2 Ch04_ChannelVerify 真实运行输出
+
+> 📦 **验证代码**：[Ch04_ChannelVerify.java](./Ch04_ChannelVerify.java) — 直接运行 `main` 方法即可复现以下输出。
+
+```
+===== Ch04 Channel 与 Unsafe 内部机制验证 =====
+
+--- 验证 1：继承体系 ---
+  NioServerSocketChannel.super = AbstractNioMessageChannel
+  包含 'Message' 或 'ServerSocket': ✅
+  NioSocketChannel.super = AbstractNioByteChannel
+  包含 'Byte' 或 'Socket': ✅
+
+--- 验证 2：Unsafe 类型 ---
+  ServerChannel.unsafe() = NioMessageUnsafe
+  包含 'message': ✅
+
+--- 验证 3：configureBlocking(false) ---
+  JDK Channel isBlocking: false (期望 false)
+  验证: ✅ 非阻塞模式
+
+--- 验证 4：readInterestOp ---
+  ServerChannel readInterestOp = 16 (期望 16=OP_ACCEPT)
+  SocketChannel readInterestOp = 1 (期望 1=OP_READ)
+  验证: ✅ 通过
+
+--- 验证 5：parent 关系 ---
+  serverChannel.parent() = null (期望 null)
+  childChannel.parent() == serverChannel: true
+  验证: ✅ 通过
+
+--- 验证 6：Pipeline Head/Tail ---
+  Pipeline 节点: [ServerBootstrap$ServerBootstrapAcceptor#0, DefaultChannelPipeline$TailContext#0]
+  包含 HeadContext: ⚠ 不可见（内部节点，HeadContext 不在 names() 返回列表中）
+  包含 TailContext: ✅
+  ✅ Pipeline 结构验证完成
+
+--- 验证 7：状态机转换 ---
+  bind 后: isOpen=true isRegistered=true isActive=true
+  close后: isOpen=false isRegistered=false isActive=false
+  验证: ✅ 状态机转换正确
+
+--- 验证 8：WriteBufferWaterMark ---
+  lowWaterMark  = 32768 bytes (32 KB), 期望 32768 (32KB)
+  highWaterMark = 65536 bytes (64 KB), 期望 65536 (64KB)
+  验证: ✅ 通过
+
+--- 验证 9：write/flush 分离 ---
+  write 后 (无 flush): 客户端收到数据=false (期望 false)
+  flush 后:            客户端收到数据=true (期望 true)
+  验证: ✅ write/flush 分离正确
+
+✅ Ch04 所有验证通过
+```
+
+> **🔍 验证结论**：
+> - 继承体系 ✅：`NioServerSocketChannel → AbstractNioMessageChannel`，`NioSocketChannel → AbstractNioByteChannel`
+> - Unsafe 类型 ✅：ServerChannel 使用 `NioMessageUnsafe`（处理 accept）
+> - 非阻塞模式 ✅：JDK Channel 在构造时被 `configureBlocking(false)`
+> - readInterestOp ✅：Server=16(`OP_ACCEPT`)，Socket=1(`OP_READ`)
+> - parent 关系 ✅：ServerChannel.parent()=null，子 Channel.parent()=ServerChannel
+> - Pipeline ✅：包含 HeadContext（内部不可见）和 TailContext
+> - 状态机 ✅：bind 后 Active，close 后 !Open && !Registered && !Active
+> - WaterMark ✅：默认 low=32KB, high=64KB
+> - write/flush 分离 ✅：write 只入缓冲区，flush 才发送
+
 ---
 
 ## 十二、Self-Check
@@ -1060,3 +1131,20 @@ graph TB
    A：ServerSocketChannel 的 METADATA 是 `new ChannelMetadata(false, 16)`，表示 `hasDisconnect=false, defaultMaxMessagesPerRead=16`。这个 16 控制 NioMessageUnsafe.read() 循环次数上限，每轮最多 accept 16 个连接。已在 4.5 节提到。NioSocketChannel 的 METADATA 在 AbstractNioByteChannel 中定义也是 16，但含义不同（每轮最多读 16 次 ByteBuf）。
 
 > **下一步**：进入 `02-channel-read-accept-flow.md`，深度分析 read 路径——ServerChannel 的 accept 完整流程和 SocketChannel 的字节读取流程。
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  1. 已对照 AbstractChannel 构造器 + 12个字段（AbstractChannel.java），差异：无
+  2. 已对照 DefaultChannelPipeline 构造器（DefaultChannelPipeline.java），差异：无
+  3. 已对照 AbstractNioChannel 构造器（两个重载）+ 9个字段（AbstractNioChannel.java），差异：无
+  4. 已对照 AbstractNioMessageChannel 构造器 + inputShutdown 字段（AbstractNioMessageChannel.java），差异：无
+  5. 已对照 AbstractNioByteChannel 构造器 + flushTask/inputClosedSeenErrorOnRead + incompleteWrite()（AbstractNioByteChannel.java），差异：无
+  6. 已对照 NioServerSocketChannel 完整构造链 + doReadMessages() + isActive()（NioServerSocketChannel.java），差异：无
+  7. 已对照 NioSocketChannel 构造器 + doReadBytes()/doWriteBytes()/isActive()（NioSocketChannel.java），差异：无
+  8. 已对照 AbstractUnsafe 4个字段（AbstractChannel.java），差异：无
+  9. 已对照 ChannelOutboundBuffer.addMessage() 源码（ChannelOutboundBuffer.java），差异：无
+  10. 已对照 ChannelOutboundBuffer.addFlush() 源码（ChannelOutboundBuffer.java），差异：setUncancellable() 返回值检查被简化 → 已修正
+  11. 已对照 ChannelOutboundBuffer 7个核心字段（ChannelOutboundBuffer.java），差异：无
+  12. 已对照 Entry 内部类全部字段（ChannelOutboundBuffer.java），差异：缺少 handle 字段和 count 初始值 → 已修正
+  13. 已对照 WriteBufferWaterMark 默认值 32KB/64KB（WriteBufferWaterMark.java），差异：无
+  结论：2处差异已修正
+-->

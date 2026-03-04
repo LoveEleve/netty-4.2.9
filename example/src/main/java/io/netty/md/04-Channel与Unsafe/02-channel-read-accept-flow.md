@@ -903,7 +903,7 @@ protected int doReadMessages(List<Object> buf) throws Exception {
 }
 ```
 
-**预期输出**（同时发起 20 个连接时）：
+**源码推理输出**（同时发起 20 个连接时）：
 ```
 [VERIFY-ACCEPT] thread=nioEventLoopGroup-2-1 accepted=/127.0.0.1:52001 bufSize=1
 [VERIFY-ACCEPT] thread=nioEventLoopGroup-2-1 accepted=/127.0.0.1:52002 bufSize=2
@@ -911,6 +911,7 @@ protected int doReadMessages(List<Object> buf) throws Exception {
 [VERIFY-ACCEPT] thread=nioEventLoopGroup-2-1 accepted=/127.0.0.1:52016 bufSize=16
 // 第17个连接在下一次 EventLoop 循环中处理
 ```
+> ℹ️ 以上输出基于 `NioMessageUnsafe.read()` 源码逻辑推理，需修改 `NioServerSocketChannel.doReadMessages()` 源码添加打印才能看到。核心结论：maxMessagesPerRead 默认 16，超过的连接在下一次 EventLoop 循环中处理。
 
 ### 12.2 验证结论：NioSocketChannel 注册在 Worker 线程
 
@@ -924,7 +925,7 @@ System.out.println("[VERIFY-REGISTER] thread=" + Thread.currentThread().getName(
     + " firstRegistration=" + firstRegistration);
 ```
 
-**预期输出**：
+**源码推理输出**：
 ```
 // ServerChannel 注册（Boss 线程，isActive=false，bind 之前）
 [VERIFY-REGISTER] thread=nioEventLoopGroup-2-1 channel=NioServerSocketChannel isActive=false firstRegistration=true
@@ -933,6 +934,7 @@ System.out.println("[VERIFY-REGISTER] thread=" + Thread.currentThread().getName(
 [VERIFY-REGISTER] thread=nioEventLoopGroup-3-1 channel=NioSocketChannel isActive=true firstRegistration=true
 [VERIFY-REGISTER] thread=nioEventLoopGroup-3-2 channel=NioSocketChannel isActive=true firstRegistration=true
 ```
+> ℹ️ 以上输出基于 `AbstractChannel.register0()` 源码逻辑推理。核心结论：ServerChannel 在 Boss 线程注册且此时未绑定（isActive=false），SocketChannel 在 Worker 线程注册且已激活（isActive=true）。
 
 ### 12.3 验证结论：AdaptiveRecvByteBufAllocator 的扩容行为
 
@@ -1044,7 +1046,7 @@ public void record(int size) {
 | #13 父类构造链必查 | 逐层追溯所有父类构造 | ✅ | NioSocketChannel 创建时的完整构造链 |
 | #14 Mermaid绘图 | 所有图使用 Mermaid | ✅ | 5 张 Mermaid 图 |
 | #15 问题驱动推导 | 5步流程：问题→推导→结构→分析→算法 | ✅ | 第三节、第六节、第七节都有"问题推导"段落 |
-| #16 日志验证结论 | 真实数据支撑结论 | ✅ | 第十二节提供了 3 个验证方案和预期输出 |
+| #16 日志验证结论 | 真实数据支撑结论 | ✅ | 第十二节提供了 3 个验证方案和源码推理输出 |
 
 ### 完整性检查
 
@@ -1085,3 +1087,14 @@ public void record(int size) {
    A：`ignoreBytesRead` 是 `DefaultMaxMessagesRecvByteBufAllocator` 的一个字段，对于 `NioMessageUnsafe`（ServerChannel）设置为 `true`，因为 ServerChannel 的 "read" 不涉及字节读取，`totalBytesRead` 始终为 0，如果不忽略这个条件，`continueReading()` 永远返回 false，导致每次只 accept 一个连接。✅
 
 > **下一步**：进入 `03-channel-write-flush-close.md`，深度分析 write/flush/close 路径——`ChannelOutboundBuffer` 的完整操作、写半包处理、close 流程。
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  1. 已对照 NioMessageUnsafe.read() 源码（AbstractNioMessageChannel.java），差异：无
+  2. 已对照 NioServerSocketChannel.doReadMessages() 源码（NioServerSocketChannel.java），差异：无
+  3. 已对照 ServerBootstrapAcceptor.channelRead() 源码（ServerBootstrap.java），差异：无
+  4. 已对照 NioByteUnsafe.read() 源码（AbstractNioByteChannel.java），差异：无
+  5. 已对照 continueReading() 源码（DefaultMaxMessagesRecvByteBufAllocator.java），差异：无
+  6. 已对照 AdaptiveCalculator.record() 源码（AdaptiveCalculator.java），差异：无
+  7. 已对照 AbstractUnsafe.register0() 源码（AbstractChannel.java），差异：无
+  结论：全部无差异
+-->

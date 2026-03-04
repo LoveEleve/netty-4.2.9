@@ -934,6 +934,161 @@ graph TB
 
 ---
 
+## 九（补充）、EventLoop 关闭状态机与流程详解
+
+> 本节补充 EventLoop 关闭（shutdown）的**完整状态转换**和 **`doStartThread()` finally 块中的关闭流程**，这是 run loop 退出的核心逻辑。
+
+### 9.1 关闭状态机全景图
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "🟢 ST_STARTED (4)" as STARTED
+    state "🟡 ST_SHUTTING_DOWN (5)" as SHUTTING_DOWN
+    state "🔴 ST_SHUTDOWN (6)" as SHUTDOWN
+    state "⚫ ST_TERMINATED (7)" as TERMINATED
+
+    [*] --> STARTED : 线程已在运行
+
+    STARTED --> SHUTTING_DOWN : shutdownGracefully(quietPeriod, timeout)
+    SHUTTING_DOWN --> SHUTDOWN : confirmShutdown() 返回 true\n（quietPeriod 内无新任务 或 已超时）
+    SHUTDOWN --> TERMINATED : cleanup() 完成\nthreadLock.countDown()
+
+    TERMINATED --> [*]
+
+    note right of SHUTTING_DOWN
+        🔑 关键行为：
+        1. 仍然接受新任务（graceful shutdown 需要）
+        2. 循环执行 confirmShutdown()
+        3. 运行所有剩余 tasks + scheduledTasks
+        4. 执行 shutdownHooks
+        5. 等待 quietPeriod 内无新任务到达
+    end note
+
+    note right of SHUTDOWN
+        🔑 关键行为：
+        1. 拒绝所有新提交的任务（RejectedExecutionException）
+        2. 最后一次 confirmShutdown()
+        3. 执行真正的最终清理
+    end note
+
+    note right of TERMINATED
+        🔑 关键行为：
+        1. threadLock.countDown() → 唤醒 awaitTermination() 等待者
+        2. terminationFuture.setSuccess(null) → 通知监听者
+        3. 线程退出
+    end note
+```
+
+### 9.2 doStartThread() finally 关闭流程时序图
+
+**源码位置**：`SingleThreadEventExecutor.java` 第 1215-1280 行
+
+当 `run()` 方法退出（正常返回或异常）后，`doStartThread()` 的 finally 块接管关闭流程：
+
+```mermaid
+sequenceDiagram
+    participant Run as run() 方法
+    participant Finally as doStartThread() finally
+    participant CS as confirmShutdown()
+    participant Cleanup as cleanup()
+
+    Run->>Finally: run() 返回（正常/异常）
+
+    Note over Finally: ① CAS: state → ST_SHUTTING_DOWN
+    Finally->>Finally: CAS(oldState, ST_SHUTTING_DOWN)<br/>可能从 ST_STARTED 或异常状态转入
+
+    Note over Finally: ② 检查 gracefulShutdownStartTime
+    Finally->>Finally: 如果 gracefulShutdownStartTime==0<br/>说明 run() 未调用 confirmShutdown()，打印 ERROR
+
+    Note over Finally: ③ 循环执行 confirmShutdown()
+    loop 直到 confirmShutdown() 返回 true
+        Finally->>CS: confirmShutdown()
+        CS->>CS: cancelScheduledTasks()
+        CS->>CS: runAllTasks()
+        CS->>CS: runShutdownHooks()
+        CS->>CS: 检查 quietPeriod 和 timeout
+        CS-->>Finally: true / false
+    end
+
+    Note over Finally: ④ CAS: state → ST_SHUTDOWN
+    Finally->>Finally: CAS(currentState, ST_SHUTDOWN)<br/>此后拒绝新任务
+
+    Note over Finally: ⑤ 最终一次 confirmShutdown()
+    Finally->>CS: confirmShutdown()<br/>处理 ④ 之前最后时刻提交的任务
+
+    Note over Finally: ⑥ cleanup()
+    Finally->>Cleanup: cleanup()<br/>NioIoHandler: 关闭 Selector
+
+    Note over Finally: ⑦ 状态终结
+    Finally->>Finally: state = ST_TERMINATED
+    Finally->>Finally: threadLock.countDown()
+    Finally->>Finally: terminationFuture.setSuccess(null)
+
+    Note over Finally: ⑧ 释放锁
+    Finally->>Finally: processingLock.unlock()
+    Finally->>Finally: thread = null
+```
+
+### 9.3 confirmShutdown() 决策流程图
+
+**源码位置**：`SingleThreadEventExecutor.java` 第 914-975 行
+
+```mermaid
+flowchart TD
+    Start(["confirmShutdown() 入口"]) --> Check1{"isShuttingDown()?"}
+    Check1 -->|No| RetFalse1(["return false"])
+    Check1 -->|Yes| Check2{"inEventLoop()?"}
+    Check2 -->|No| Throw["throw IllegalStateException"]
+    Check2 -->|Yes| Cancel["cancelScheduledTasks()"]
+
+    Cancel --> InitTime{"gracefulShutdownStartTime == 0?"}
+    InitTime -->|Yes| SetTime["gracefulShutdownStartTime = now"]
+    InitTime -->|No| Skip1[继续]
+    SetTime --> RunTasks
+
+    Skip1 --> RunTasks
+    RunTasks["runAllTasks() || runShutdownHooks()"]
+
+    RunTasks --> HasWork{"有任务/Hook 被执行?"}
+    HasWork -->|Yes| CheckShutdown{"isShutdown()?<br/>(state >= ST_SHUTDOWN)"}
+    CheckShutdown -->|Yes| RetTrue1(["return true<br/>(已 SHUTDOWN, 不再等待)"])
+    CheckShutdown -->|No| CheckQuiet{"quietPeriod == 0?"}
+    CheckQuiet -->|Yes| RetTrue2(["return true<br/>(不需要静默期)"])
+    CheckQuiet -->|No| Wakeup["taskQueue.offer(WAKEUP_TASK)<br/>return false<br/>(有工作说明不够静默)"]
+
+    HasWork -->|No| CheckTime["nanoTime = now"]
+    CheckTime --> CheckTimeout{"isShutdown() 或<br/>now - startTime > timeout?"}
+    CheckTimeout -->|Yes| RetTrue3(["return true<br/>(超时强制退出)"])
+    CheckTimeout -->|No| CheckQuietPeriod{"now - lastExecutionTime<br/><= quietPeriod?"}
+    CheckQuietPeriod -->|Yes| Sleep["taskQueue.offer(WAKEUP_TASK)<br/>Thread.sleep(100ms)<br/>return false<br/>(静默期内仍有近期活动)"]
+    CheckQuietPeriod -->|No| RetTrue4(["return true<br/>(静默期内无活动, 可以终止)"])
+
+    style RetTrue1 fill:#c8e6c9
+    style RetTrue2 fill:#c8e6c9
+    style RetTrue3 fill:#c8e6c9
+    style RetTrue4 fill:#c8e6c9
+    style RetFalse1 fill:#ffcdd2
+    style Wakeup fill:#ffcdd2
+    style Sleep fill:#fff3e0
+```
+
+### 9.4 关闭流程的设计动机
+
+| 设计决策 | 原因 |
+|---------|------|
+| **ST_SHUTTING_DOWN 仍接受任务** | graceful shutdown 期间，Channel 的 close 操作会提交 deregister 等任务到 EventLoop，必须允许这些清理任务执行 |
+| **confirmShutdown() 循环执行** | 每轮可能产生新的清理任务（如 close 触发 flush → 触发 writeComplete 回调），需要迭代直到稳定 |
+| **quietPeriod 机制** | 确保一段时间内没有新任务到达才终止，避免"刚 shutdown 就有新任务提交"导致任务丢失 |
+| **timeout 兜底** | 防止 quietPeriod 机制下永远无法终止（不断有新任务导致 quietPeriod 被重置） |
+| **最终 confirmShutdown()** | ST_SHUTDOWN 设置之前最后时刻可能有任务提交，需要再处理一轮 |
+| **Thread.sleep(100ms)** | 在等待 quietPeriod 时避免空转消耗 CPU，100ms 是检查间隔 |
+
+> ⚠️ **生产踩坑**：如果 `shutdownGracefully()` 的 quietPeriod 设置过长（如默认 2 秒），在大量连接同时关闭时，关闭流程可能比预期慢很多——因为每个连接的 close 回调都会"重置"quietPeriod 的计时。建议在已知所有连接都处理完毕后，使用较短的 quietPeriod（如 0 或 100ms）。
+
+---
+
 ## 十、面试问答
 
 **Q1**：Netty 的事件循环三阶段是什么？ 🔥  
@@ -1004,3 +1159,24 @@ graph TB
 
 3. **Q：fetchFromScheduledTaskQueue 返回 false 时（taskQueue 满了），定时任务会丢失吗？**  
    A：不会。源码中 `taskQueue.offer(scheduledTask)` 失败时，会 `scheduledTaskQueue.add(scheduledTask)` 放回定时队列。但在默认配置下 `maxPendingTasks = Integer.MAX_VALUE`（MpscUnboundedQueue），`offer()` 永远不会失败。这个分支主要是为了有界队列场景的安全性。✅
+
+---
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  已对照 SingleThreadEventExecutor.execute() / execute0() / execute(task,immediate) 源码（SingleThreadEventExecutor.java），差异：无
+  已对照 SingleThreadEventExecutor.startThread() / doStartThread() 源码（SingleThreadEventExecutor.java），差异：无
+  已对照 SingleThreadIoEventLoop.run() / runIo() 源码（SingleThreadIoEventLoop.java），差异：无
+  已对照 NioIoHandler.run() 源码（NioIoHandler.java），差异：无
+  已对照 DefaultSelectStrategy.calculateStrategy() 源码（DefaultSelectStrategy.java），差异：无
+  已对照 NioIoHandler.select(context,oldWakenUp) 源码（NioIoHandler.java），差异：无
+  已对照 NioIoHandler.selectNow() 源码（NioIoHandler.java），差异：无
+  已对照 NioIoHandler.processSelectedKeys() / processSelectedKeysOptimized() / processSelectedKeysPlain() 源码（NioIoHandler.java），差异：无
+  已对照 NioIoHandler.processSelectedKey() 源码（NioIoHandler.java），差异：无
+  已对照 DefaultNioRegistration.cancel() 源码（NioIoHandler.java），差异：无
+  已对照 NioIoHandler.rebuildSelector0() 源码（NioIoHandler.java），差异：无
+  已对照 SingleThreadEventExecutor.runAllTasks(timeoutNanos) 源码（SingleThreadEventExecutor.java），差异：无
+  已对照 AbstractScheduledEventExecutor.fetchFromScheduledTaskQueue() 源码（AbstractScheduledEventExecutor.java），差异：无
+  已对照 SingleThreadEventExecutor.delayNanos() 源码（SingleThreadEventExecutor.java），差异：无
+  已对照 NioIoHandler.wakeup() 源码（NioIoHandler.java），差异：无
+  结论：全部源码引用均无差异
+-->

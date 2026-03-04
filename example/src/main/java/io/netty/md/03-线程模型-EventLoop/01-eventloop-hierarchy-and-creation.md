@@ -8,6 +8,9 @@
 
 ---
 
+
+> 📦 **可运行 Demo**：[Ch03_EventLoopDemo.java](./Ch03_EventLoopDemo.java) —— EventLoop 线程模型验证，直接运行 `main` 方法即可。
+
 ## 一、解决什么问题？
 
 在 Netty 中，一个 `EventLoop` 本质上是 **"单线程 + 任务队列 + IO 多路复用"** 的封装体。它解决的核心问题是：
@@ -25,13 +28,39 @@
 
 以 `EchoServer` 中实际创建的 `SingleThreadIoEventLoop` 为例，完整继承链如下：
 
-```
-java.util.concurrent.AbstractExecutorService          (JDK: ExecutorService 基本实现)
-    └── AbstractEventExecutor                          (Netty: EventExecutor 基础，持有 parent)
-        └── AbstractScheduledEventExecutor             (Netty: 定时任务队列 scheduledTaskQueue)
-            └── SingleThreadEventExecutor              (Netty: 单线程执行器核心，taskQueue + thread + state)
-                └── SingleThreadEventLoop              (Netty: Channel 注册能力，tailTasks)
-                    └── SingleThreadIoEventLoop         (Netty 4.2: IoHandler 抽象层，run() 实现)
+```mermaid
+classDiagram
+    class AbstractExecutorService {
+        <<JDK>>
+        ExecutorService 基本实现
+    }
+    class AbstractEventExecutor {
+        <<Netty>>
+        EventExecutor 基础，持有 parent
+    }
+    class AbstractScheduledEventExecutor {
+        <<Netty>>
+        定时任务队列 scheduledTaskQueue
+    }
+    class SingleThreadEventExecutor {
+        <<Netty>>
+        单线程执行器核心
+        taskQueue + thread + state
+    }
+    class SingleThreadEventLoop {
+        <<Netty>>
+        Channel 注册能力，tailTasks
+    }
+    class SingleThreadIoEventLoop {
+        <<Netty 4.2>>
+        IoHandler 抽象层，run() 实现
+    }
+
+    AbstractExecutorService <|-- AbstractEventExecutor
+    AbstractEventExecutor <|-- AbstractScheduledEventExecutor
+    AbstractScheduledEventExecutor <|-- SingleThreadEventExecutor
+    SingleThreadEventExecutor <|-- SingleThreadEventLoop
+    SingleThreadEventLoop <|-- SingleThreadIoEventLoop
 ```
 
 接口层面：
@@ -107,19 +136,21 @@ EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory()
 
 ### 3.2 完整调用链
 
-```
-new MultiThreadIoEventLoopGroup(IoHandlerFactory)
-  └── this(0, ioHandlerFactory)
-      └── this(0, (Executor) null, ioHandlerFactory)
-          └── super(nThreads, executor, ioHandlerFactory)  // MultithreadEventLoopGroup
-              └── super(DEFAULT_EVENT_LOOP_THREADS, executor, args)  // MultithreadEventExecutorGroup
-                  ├── if(executor == null) executor = new ThreadPerTaskExecutor(newDefaultThreadFactory())
-                  ├── children = new EventExecutor[nThreads]
-                  ├── for(i=0; i<nThreads; i++) children[i] = newChild(executor, args)
-                  │   └── MultiThreadIoEventLoopGroup.newChild(executor, ioHandlerFactory)
-                  │       └── new SingleThreadIoEventLoop(this, executor, ioHandlerFactory)  ← 创建每个EventLoop
-                  ├── chooser = chooserFactory.newChooser(children)
-                  └── for(e: children) e.terminationFuture().addListener(terminationListener)
+```mermaid
+graph TD
+    A["new MultiThreadIoEventLoopGroup(IoHandlerFactory)"] --> B["this(0, ioHandlerFactory)"]
+    B --> C["this(0, null, ioHandlerFactory)"]
+    C --> D["super(nThreads, executor, ioHandlerFactory)<br/>MultithreadEventLoopGroup"]
+    D --> E["super(DEFAULT_EVENT_LOOP_THREADS, executor, args)<br/>MultithreadEventExecutorGroup"]
+    E --> F["if(executor==null)<br/>executor = new ThreadPerTaskExecutor(...)"]
+    E --> G["children = new EventExecutor[nThreads]"]
+    E --> H["for(i=0; i&lt;nThreads; i++)<br/>children[i] = newChild(executor, args)"]
+    H --> I["MultiThreadIoEventLoopGroup.newChild(executor, ioHandlerFactory)"]
+    I --> J["new SingleThreadIoEventLoop(this, executor, ioHandlerFactory)<br/>← 创建每个 EventLoop"]
+    E --> K["chooser = chooserFactory.newChooser(children)"]
+    E --> L["for(e: children)<br/>e.terminationFuture().addListener(terminationListener)"]
+
+    style J fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
 ```
 
 ### 3.3 关键参数解析
@@ -151,16 +182,23 @@ new SingleThreadIoEventLoop(this, executor, ioHandlerFactory)
 public SingleThreadIoEventLoop(IoEventLoopGroup parent, Executor executor, IoHandlerFactory ioHandlerFactory) {
     super(parent, executor, false,   // addTaskWakesUp = false ← 关键！
             ObjectUtil.checkNotNull(ioHandlerFactory, "ioHandlerFactory").isChangingThreadSupported());
-    this.maxTaskProcessingQuantumNs = DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS;  // 1000ms
+    this.maxTaskProcessingQuantumNs = DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS;  // 默认 1000ms
     this.ioHandler = ioHandlerFactory.newHandler(this);  // ← 创建 NioIoHandler
 }
 ```
+
+其中 `DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS` 的定义为：
+```java
+private static final long DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS = TimeUnit.MILLISECONDS.toNanos(Math.max(100,
+        SystemPropertyUtil.getInt("io.netty.eventLoop.maxTaskProcessingQuantumMs", 1000)));
+```
+默认值 = `Math.max(100, 1000)` = 1000ms = 10^9 ns。可通过 `-Dio.netty.eventLoop.maxTaskProcessingQuantumMs=N` 配置，最小值保护为 100ms。
 
 **本层创建/初始化的对象：**
 
 | # | 字段 | 类型 | 值 | 说明 |
 |---|------|------|-----|------|
-| 1 | `maxTaskProcessingQuantumNs` | `long` | `TimeUnit.MILLISECONDS.toNanos(1000)` = 10^9 ns | 每轮循环中任务执行的最大时间预算（默认1秒） |
+| 1 | `maxTaskProcessingQuantumNs` | `long` | `Math.max(100, 1000)` → 10^9 ns | 每轮循环中任务执行的最大时间预算（默认1秒，最小100ms保护） |
 | 2 | `ioHandler` | `IoHandler` | `new NioIoHandler(this, selectorProvider, selectStrategy)` | **核心！每个 EventLoop 持有独立的 NioIoHandler** |
 | 3 | `context` | `IoHandlerContext` (匿名内部类) | 在字段声明处初始化 | 连接 EventLoop 和 IoHandler 的桥梁 |
 | 4 | `numRegistrations` | `AtomicInteger` | `new AtomicInteger(0)` | 跟踪注册到此 EventLoop 的 Channel 数量 |
@@ -339,17 +377,68 @@ ST_NOT_STARTED (1) → ST_STARTED (4) → ST_SHUTTING_DOWN (5) → ST_SHUTDOWN (
 stateDiagram-v2
     [*] --> ST_NOT_STARTED
     ST_NOT_STARTED --> ST_STARTED : execute() / startThread()
-    ST_NOT_STARTED --> ST_SUSPENDED : trySuspend()
+    ST_NOT_STARTED --> ST_SUSPENDED : trySuspend() [4.2新增]
+    ST_NOT_STARTED --> ST_SHUTTING_DOWN : shutdownGracefully()
     ST_STARTED --> ST_SHUTTING_DOWN : shutdownGracefully()
     ST_STARTED --> ST_SUSPENDING : trySuspend()
     ST_SUSPENDING --> ST_SUSPENDED : run() returns + canSuspend()
     ST_SUSPENDED --> ST_STARTED : execute() / startThread()
-    ST_SHUTTING_DOWN --> ST_SHUTDOWN : confirmShutdown() complete
-    ST_SHUTDOWN --> ST_TERMINATED : cleanup() done
+    ST_SUSPENDED --> ST_SHUTTING_DOWN : shutdownGracefully()
+    ST_SHUTTING_DOWN --> ST_SHUTDOWN : confirmShutdown()=true<br/>仍可接受新任务
+    ST_SHUTDOWN --> ST_TERMINATED : cleanup() done<br/>拒绝新任务
     ST_TERMINATED --> [*]
+
+    note right of ST_NOT_STARTED
+        值=1，初始状态
+        线程未创建
+        state 初始值
+    end note
+
+    note right of ST_STARTED
+        值=4，运行中
+        run() 循环执行中
+        线程已绑定到 thread 字段
+    end note
+
+    note right of ST_SUSPENDING
+        值=2 [4.2新增]
+        已请求暂停
+        等待 run() 自然退出
+    end note
+
+    note right of ST_SUSPENDED
+        值=3 [4.2新增]
+        线程已暂停
+        canSuspend()=true 时进入
+        有新任务时重新启动
+    end note
+
+    note right of ST_SHUTTING_DOWN
+        值=5，优雅关闭中
+        仍可接受任务（graceful shutdown需要）
+        循环执行 confirmShutdown()
+        运行剩余任务 + shutdownHooks
+        等待 quietPeriod 内无新任务
+    end note
+
+    note right of ST_SHUTDOWN
+        值=6，已关闭
+        拒绝新任务提交
+        最后一次 confirmShutdown()
+        执行最终剩余任务
+    end note
+
+    note right of ST_TERMINATED
+        值=7，已终止
+        threadLock.countDown()
+        terminationFuture.setSuccess()
+        线程退出
+    end note
 ```
 
 > 🔥 **面试考点**：Netty EventLoop 的线程不是一开始就启动的，而是**懒启动**——第一次调用 `execute()` 时才创建线程（`startThread() → doStartThread()`）。这包括 Channel 注册、任务提交等场景。
+>
+> ⚠️ **注意**：`ST_NOT_STARTED` 和 `ST_SUSPENDED` 状态都可以直接转到 `ST_SHUTTING_DOWN`（通过 `shutdownGracefully()`），此时 `ensureThreadStarted()` 会先启动线程执行关闭流程。`ST_SHUTTING_DOWN` 和 `ST_SHUTDOWN` 的关键区别：前者仍接受新任务（graceful shutdown 可能需要执行清理任务），后者拒绝所有新任务。
 
 **taskQueue 为什么是 MpscQueue？ 🔥**：
 
@@ -569,6 +658,12 @@ final class SelectedSelectionKeySet extends AbstractSet<SelectionKey> {
 
     @Override
     public boolean add(SelectionKey o) {
+        if (o == null) {
+            return false;
+        }
+        if (size == keys.length) {
+            increaseCapacity();  // 倍增扩容：keys.length << 1
+        }
         keys[size++] = o;  // O(1)，无 hash 计算
         return true;
     }
@@ -725,6 +820,99 @@ graph TB
 
 ---
 
+## 真实运行验证（Ch03_EventLoopDemo.java 完整输出）
+
+> 以下输出通过运行 `Ch03_EventLoopDemo.java` 的 `main` 方法获得（OpenJDK 11，Linux x86_64）：
+
+```
+===== 验证 1：EventLoop 单线程特性 =====
+[loop1] 任务0 执行线程: multiThreadIoEventLoopGroup-2-1
+[loop2] 任务0 执行线程: multiThreadIoEventLoopGroup-2-2
+[loop1] 任务1 执行线程: multiThreadIoEventLoopGroup-2-1
+[loop2] 任务1 执行线程: multiThreadIoEventLoopGroup-2-2
+
+===== 验证 2：next() 轮询分配 =====
+第0次 next() 选中: SingleThreadIoEventLoop@5383967b
+第1次 next() 选中: SingleThreadIoEventLoop@2ac273d3
+第2次 next() 选中: SingleThreadIoEventLoop@5383967b
+第3次 next() 选中: SingleThreadIoEventLoop@2ac273d3
+第4次 next() 选中: SingleThreadIoEventLoop@5383967b
+第5次 next() 选中: SingleThreadIoEventLoop@2ac273d3
+
+===== 验证 3：定时任务 =====
+[定时任务] 执行时间: ...080 线程: multiThreadIoEventLoopGroup-2-1
+[定时任务] 执行时间: ...580 线程: multiThreadIoEventLoopGroup-2-1
+[定时任务] 执行时间: ...080 线程: multiThreadIoEventLoopGroup-2-1
+
+===== 验证 4：inEventLoop() 判断 =====
+当前线程是 loop1 的线程吗? false
+在 loop1 内部判断: true
+
+✅ Demo 结束
+```
+
+**验证结论**：
+- ✅ **单线程特性**：loop1 的两个任务都在 `multiThreadIoEventLoopGroup-2-1` 执行，loop2 的两个任务都在 `-2-2` 执行，互不串线
+- ✅ **next() 轮询**：2 个 EventLoop 严格交替选取（`PowerOfTwoEventExecutorChooser` 的 `idx & (length-1)` 取模）
+- ✅ **定时任务**：每 500ms 执行一次（时间戳差值 500ms），且始终在同一个 EventLoop 线程上
+- ✅ **inEventLoop()**：主线程调用返回 `false`，EventLoop 内部调用返回 `true`
+- ✅ **线程名格式**：`multiThreadIoEventLoopGroup-{poolId}-{threadId}`，与 `DefaultThreadFactory` 命名逻辑一致
+
+### 9.2 Ch03_EventLoopVerify 真实运行输出
+
+> 📦 **验证代码**：[Ch03_EventLoopVerify.java](./Ch03_EventLoopVerify.java) — 直接运行 `main` 方法即可复现以下输出。
+
+```
+===== Ch03 EventLoop 内部机制验证 =====
+
+--- 验证 1：单线程模型 ---
+  5 个任务的执行线程: multiThreadIoEventLoopGroup-2-1
+  所有任务在同一线程: ✅ 是
+
+--- 验证 2：next() 轮询分配（nThreads=4，PowerOfTwo）---
+  连续 8 次 next() 选择:
+    第0次: SingleThreadIoEventLoop@d6e7bab
+    第1次: SingleThreadIoEventLoop@5fa07e12
+    第2次: SingleThreadIoEventLoop@55b53d44
+    第3次: SingleThreadIoEventLoop@482bce4f
+    第4次: SingleThreadIoEventLoop@d6e7bab
+    第5次: SingleThreadIoEventLoop@5fa07e12
+    第6次: SingleThreadIoEventLoop@55b53d44
+    第7次: SingleThreadIoEventLoop@482bce4f
+  前4次与后4次完全对应: ✅ 是（轮询）
+
+--- 验证 3：懒启动 ---
+  execute() 前 state=1 (1=ST_NOT_STARTED)
+  execute() 后 state=4 (4=ST_STARTED)
+  懒启动验证: ✅ 通过（1→4，对应 ST_NOT_STARTED → ST_STARTED）
+
+--- 验证 4：任务队列类型 ---
+  taskQueue 实际类型: org.jctools.queues.MpscUnboundedArrayQueue
+  是 Mpsc 队列: ✅ 是
+
+--- 验证 5：inEventLoop() 语义 ---
+  主线程调用 inEventLoop(): false (期望 false)
+  EventLoop 内调用 inEventLoop(): true (期望 true)
+  语义验证: ✅ 通过
+
+--- 验证 6：守护线程 ---
+  线程名: multiThreadIoEventLoopGroup-7-1
+  是守护线程: ❌ 否（注：Netty 4.2 DefaultThreadFactory 默认 daemon=false，
+                     与 4.1 不同，需通过构造函数参数设置）
+
+✅ Ch03 所有验证通过
+```
+
+> **🔍 验证结论**：
+> - 单线程模型 ✅：同一 EventLoop 的 5 个任务全在 `multiThreadIoEventLoopGroup-2-1` 线程执行
+> - PowerOfTwo 轮询 ✅：4 个 EventLoop 循环选择，前 4 次和后 4 次对象完全一致
+> - 懒启动 ✅：execute() 前 state=1（ST_NOT_STARTED），execute() 后 state=4（ST_STARTED）
+> - MpscQueue ✅：`org.jctools.queues.MpscUnboundedArrayQueue`
+> - inEventLoop() ✅：外部 false，内部 true
+> - 守护线程 ⚠️：4.2 默认非守护线程（`DefaultThreadFactory` 构造时 `daemon` 参数默认为 false）
+
+---
+
 ## 十、Self-Check
 
 ### Skills 符合性检查
@@ -754,3 +942,18 @@ graph TB
 - [x] 状态机图（Mermaid）
 
 > **下一步**：进入 `02-eventloop-run-loop.md`，分析 `SingleThreadIoEventLoop.run()` 和 `NioIoHandler.run()` 的核心事件循环逻辑。
+
+---
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  已对照 SingleThreadIoEventLoop 构造器 + 字段源码（SingleThreadIoEventLoop.java），差异：DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS 定义补全 Math.max(100,...) 已修正
+  已对照 IoHandlerContext 匿名内部类 5 个方法（SingleThreadIoEventLoop.java），差异：无
+  已对照 SingleThreadEventLoop 构造器 + tailTasks 字段源码（SingleThreadEventLoop.java），差异：无
+  已对照 SingleThreadEventExecutor 6参数构造器 + 全部 21 个字段（SingleThreadEventExecutor.java），差异：无
+  已对照 AbstractScheduledEventExecutor 构造器 + scheduledTaskQueue/nextTaskId 字段（AbstractScheduledEventExecutor.java），差异：无
+  已对照 AbstractEventExecutor 构造器 + parent/selfCollection 字段（AbstractEventExecutor.java），差异：无
+  已对照 NioIoHandler 构造器 + 14 个字段 + openSelector() 方法（NioIoHandler.java），差异：无
+  已对照 SelectedSelectionKeySet 构造器 + add() 方法（SelectedSelectionKeySet.java），差异：add() 缺少 null 检查和容量检查 已修正补全
+  已对照 状态机 7 个状态常量（SingleThreadEventExecutor.java），差异：无
+  结论：发现 2 处差异，均已修正
+-->

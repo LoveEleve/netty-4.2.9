@@ -82,7 +82,6 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第27-50行，字段声明与源码完全一致，差异：无 -->
 
 **两种构造函数**：
 
@@ -126,7 +125,6 @@ PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int pageShifts, int runOffs
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第52-90行，两个构造函数与源码完全一致，差异：无 -->
 
 ### 2.3 bitmap 的组织方式
 
@@ -188,7 +186,6 @@ for (int i = 0; i < smallSubpagePools.length; i ++) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolArena.java 第86-88行，初始化代码与源码完全一致，差异：无 -->
 
 每个 `smallSubpagePools[i]` 是一个 dummy head 节点，`head.next = head`（初始时链表为空，head 指向自身）。
 
@@ -222,7 +219,6 @@ private void removeFromPool() {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第163-178行，addToPool/removeFromPool 与源码完全一致，差异：无 -->
 
 ---
 
@@ -256,7 +252,6 @@ long allocate() {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第93-115行，allocate() 与源码完全一致，差异：无 -->
 
 **流程解析**：
 1. **前置检查**：`numAvail == 0`（已满）或 `!doNotDestroy`（已销毁）→ 返回 -1
@@ -278,7 +273,6 @@ private int getNextAvail() {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第183-190行，getNextAvail() 与源码完全一致，差异：无 -->
 
 **设计精妙**：
 - `nextAvail >= 0`：直接返回缓存的 bitmapIdx，O(1)
@@ -316,7 +310,6 @@ private int findNextAvail0(int i, long bits) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第192-213行，findNextAvail/findNextAvail0 与源码完全一致，差异：无 -->
 
 **流程解析**：
 1. 遍历 `bitmap[i]`，`~bits != 0` 表示该 `long` 中有空闲 bit（不全为 1）
@@ -337,7 +330,6 @@ private long toHandle(int bitmapIdx) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第215-221行，toHandle() 与源码完全一致，差异：无 -->
 
 **与 Normal run handle 的区别**：
 
@@ -388,7 +380,6 @@ boolean free(PoolSubpage<T> head, int bitmapIdx) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolSubpage.java 第117-155行，free() 与源码完全一致，差异：无 -->
 
 **流程解析**（4个分支）：
 
@@ -454,7 +445,6 @@ private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, fi
 }
 ```
 
-<!-- 核对记录：已对照 PoolArena.java 第151-193行，tcacheAllocateSmall() 与源码完全一致，差异：无 -->
 
 ---
 
@@ -589,7 +579,6 @@ Subpage handle (bitmapIdx=0, hex) = 0x700000000
   - `bitmapIdx=0`（第 0 个 slot）
   - 十六进制验证：`1L<<34 | 1L<<33 | 1L<<32 = 0x400000000 | 0x200000000 | 0x100000000 = 0x700000000` ✅
 
-<!-- 核对记录：已运行 PoolChunkVerification.java §6 验证，所有数值均为真实输出，差异：无 -->
 
 ---
 
@@ -734,4 +723,23 @@ PoolChunk.free() 通过 `isSubpage(handle)` 判断走哪条释放路径。
 2. **sizeIdx 热点**：大量线程并发分配同一 sizeIdx（如 16B），head 锁竞争激烈，可增加 `nArenas` 分散
 3. **maxNumElems=1 的特殊情况**：`free()` 中有特殊处理（`maxNumElems > 1` 才提前 return true），避免 elemSize 接近 pageSize 的 Subpage 无法被回收
 
-<!-- 核对记录：已对照 PoolSubpage.java、PoolArena.java、PoolChunk.java 全量源码，§8 所有结论均有源码支撑，差异：无 -->
+
+---
+
+## 附录：核对清单
+
+> 以下为文档编写过程中的源码核对记录，供审计追溯使用。
+
+1. 核对记录：已对照 PoolSubpage.java 第27-50行，字段声明与源码完全一致，差异：无
+2. 核对记录：已对照 PoolSubpage.java 第52-90行，两个构造函数与源码完全一致，差异：无
+3. 核对记录：已对照 PoolArena.java 第86-88行，初始化代码与源码完全一致，差异：无
+4. 核对记录：已对照 PoolSubpage.java 第163-178行，addToPool/removeFromPool 与源码完全一致，差异：无
+5. 核对记录：已对照 PoolSubpage.java 第93-115行，allocate() 与源码完全一致，差异：无
+6. 核对记录：已对照 PoolSubpage.java 第183-190行，getNextAvail() 与源码完全一致，差异：无
+7. 核对记录：已对照 PoolSubpage.java 第192-213行，findNextAvail/findNextAvail0 与源码完全一致，差异：无
+8. 核对记录：已对照 PoolSubpage.java 第215-221行，toHandle() 与源码完全一致，差异：无
+9. 核对记录：已对照 PoolSubpage.java 第117-155行，free() 与源码完全一致，差异：无
+10. 核对记录：已对照 PoolArena.java 第151-193行，tcacheAllocateSmall() 与源码完全一致，差异：无
+11. 核对记录：已运行 PoolChunkVerification.java §6 验证，所有数值均为真实输出，差异：无
+12. 核对记录：已对照 PoolSubpage.java、PoolArena.java、PoolChunk.java 全量源码，§8 所有结论均有源码支撑，差异：无
+

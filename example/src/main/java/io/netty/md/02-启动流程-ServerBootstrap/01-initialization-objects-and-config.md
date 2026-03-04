@@ -7,6 +7,9 @@
 
 ---
 
+
+> 📦 **可运行 Demo**：[Ch02_BootstrapDemo.java](./Ch02_BootstrapDemo.java) —— ServerBootstrap 启动流程验证，直接运行 `main` 方法即可。
+
 ## 一、EchoServer 初始化阶段代码全貌
 
 ```java
@@ -332,7 +335,7 @@ public class SingleThreadIoEventLoop extends SingleThreadEventLoop implements Io
         super(parent, executor, false,
                 ObjectUtil.checkNotNull(ioHandlerFactory, "ioHandlerFactory").isChangingThreadSupported());
         //      ↑ addTaskWakesUp = false（NIO 不需要通过添加任务来唤醒）
-        //                                              ↑ threadChangingSupported = true（NIO 支持）
+        //                                              ↑ supportSuspension = true（NIO 支持线程挂起/恢复，4.2 新特性）
 
         this.maxTaskProcessingQuantumNs = DEFAULT_MAX_TASK_PROCESSING_QUANTUM_NS;
 
@@ -822,6 +825,11 @@ bind() 之前，内存中的完整对象关系：
 | 45 | `maxPendingTasks` | `int` | `max(16, Integer.MAX_VALUE)` → 实际就是 MAX_VALUE |
 | 46 | `state` | `volatile int = ST_NOT_STARTED(1)` | 状态机初始状态 |
 | 47 | `thread` | `volatile Thread = null` | **懒启动！** 构造时为 null |
+| 47a | `accumulatedActiveTimeNanos` | `volatile long = 0` | 累积活跃时间（4.2 auto-scaling 用） |
+| 47b | `lastActivityTimeNanos` | `volatile long` | 最近一次活跃时间戳（4.2 auto-scaling 用） |
+| 47c | `consecutiveIdleCycles` | `volatile int = 0` | 连续空闲周期计数（4.2 auto-scaling 用） |
+| 47d | `consecutiveBusyCycles` | `volatile int = 0` | 连续繁忙周期计数（4.2 auto-scaling 用） |
+| 47e | `lastExecutionTime` | `long` | 最近一次执行任务的时间戳 |
 
 > ⚠️ **#36 的关键细节**：`ThreadExecutorMap.apply(executor, this)` 会创建一个**匿名 Executor 包装器**。它在每次 `execute(command)` 时，把 command 再包一层，设置当前线程的 `EventExecutor` 映射到 FastThreadLocal 中。这就是 `EventExecutor.currentExecutor()` 能工作的原因！
 
@@ -941,3 +949,20 @@ bind() 之前，内存中的完整对象关系：
 4. `doBind0()` — 端口绑定的完整调用链
 
 > 🎯 **带着问题读源码**（Rule #2）：下一篇要回答——**从 `bind(PORT)` 调用到端口真正可用，到底经历了哪些步骤？ServerBootstrapAcceptor 这个隐藏的 Handler 到底做了什么？**
+
+---
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  已对照 NioIoHandler.newFactory() 源码（NioIoHandler.java），差异：无
+  已对照 IoHandlerFactory 接口源码（IoHandlerFactory.java），差异：无
+  已对照 MultiThreadIoEventLoopGroup 构造链源码（MultiThreadIoEventLoopGroup.java），差异：无
+  已对照 MultithreadEventLoopGroup.DEFAULT_EVENT_LOOP_THREADS + 构造器源码（MultithreadEventLoopGroup.java），差异：无
+  已对照 MultithreadEventExecutorGroup 字段 + 构造器源码（MultithreadEventExecutorGroup.java），差异：无
+  已对照 SingleThreadIoEventLoop 字段 + 构造器源码（SingleThreadIoEventLoop.java），差异：threadChangingSupported→supportSuspension 已修正
+  已对照 NioIoHandler 私有构造器 + 字段源码（NioIoHandler.java），差异：无
+  已对照 ServerBootstrap 字段源码（ServerBootstrap.java），差异：无
+  已对照 AbstractBootstrap 字段 + group()/channel()/option()/handler() 源码（AbstractBootstrap.java），差异：无
+  已对照 ReflectiveChannelFactory 源码（ReflectiveChannelFactory.java），差异：无
+  已对照 SingleThreadEventExecutor 字段 + 构造器源码（SingleThreadEventExecutor.java），差异：缺少 auto-scaling 相关字段（accumulatedActiveTimeNanos/lastActivityTimeNanos/consecutiveIdleCycles/consecutiveBusyCycles/lastExecutionTime）已补充
+  已对照 SingleThreadEventLoop 字段源码（SingleThreadEventLoop.java），差异：无
+-->

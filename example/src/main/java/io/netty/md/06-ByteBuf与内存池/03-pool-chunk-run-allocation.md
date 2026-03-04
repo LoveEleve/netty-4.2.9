@@ -39,7 +39,6 @@
 5. `free()` 如何合并相邻的空闲 run（`collapseRuns()`）？
 6. `PoolChunkList` 如何管理不同使用率的 Chunk？晋升/降级的触发条件是什么？
 
-<!-- 核对记录：已对照 PoolChunk.java 第130-185行，字段声明顺序与源码完全一致，差异：无 -->
 
 ---
 
@@ -111,7 +110,6 @@ final class PoolChunk<T> implements PoolChunkMetric, ChunkInfo {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java 类字段声明，补全了 cleanable/base/unpooled/pinnedBytes/cachedNioBuffers 字段，差异已修正 -->
 
 #### 2.3.1 编码方案（位域定义）
 
@@ -163,7 +161,6 @@ static int bitmapIdx(long handle) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java 第680-710行，编码/解码方法签名与源码完全一致，差异：无 -->
 
 ### 2.4 runsAvail：按 pageIdx 分桶的最小堆数组
 
@@ -214,7 +211,6 @@ public final class LongLongHashMap {
   - 向前合并：查 `runsAvailMap.get(runOffset - 1)` 找前一个 run 的最后一页
   - 向后合并：查 `runsAvailMap.get(runOffset + pages)` 找后一个 run 的第一页
 
-<!-- 核对记录：已对照 LongLongHashMap.java 第1-50行，字段声明和构造函数与源码完全一致，差异：无 -->
 
 ### 2.5 PoolChunkList 核心字段
 
@@ -242,7 +238,6 @@ final class PoolChunkList<T> {
 | q075 | 75 | 100 | 0 | 1090519 |
 | q100 | 100 | MAX_VALUE | MIN_VALUE | 0 |
 
-<!-- 核对记录：已对照 PoolChunkList.java 第34-71行，字段类型均为 private final int，阈值计算公式已验证，差异：已修正字段修饰符 -->
 
 ---
 
@@ -288,7 +283,6 @@ private long allocateRun(int runSize) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java 第280-305行，allocateRun()方法逐行核对，差异：无 -->
 
 #### 3.1.2 runFirstBestFit()：Best-Fit 策略
 
@@ -342,7 +336,6 @@ private long splitLargeRun(long handle, int needPages) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java 第315-340行，splitLargeRun()方法逐行核对，差异：无 -->
 
 #### 3.1.4 insertAvailRun()：插入空闲 run
 
@@ -364,7 +357,6 @@ private void insertAvailRun(int runOffset, int pages, long handle) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java insertAvailRun() 方法，修正了懒初始化错误（源码是构造时全量初始化），差异已修正 -->
 
 ### 3.2 allocateRun() 时序图
 
@@ -403,7 +395,6 @@ sequenceDiagram
     PoolChunk->>PoolChunk: runsAvailLock.unlock()
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java allocateRun() 完整调用链，时序逻辑与源码一致，差异：无 -->
 
 ### 3.3 free()：释放内存 + 合并相邻空闲 run
 
@@ -462,7 +453,6 @@ void free(long handle, int normCapacity, ByteBuffer nioBuffer) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java free() 方法第500-540行，逐行核对，差异：无 -->
 
 #### 3.3.2 collapseRuns()：合并相邻空闲 run
 
@@ -522,7 +512,6 @@ private long collapseNext(long handle) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java collapseRuns()、collapsePast()、collapseNext() 方法第550-600行，逐行核对，差异：无 -->
 
 #### 3.3.3 free() 时序图
 
@@ -595,7 +584,6 @@ private long allocateSubpage(int sizeIdx, PoolSubpage<T> head) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java allocateSubpage() 方法第620-640行，逐行核对，差异：无 -->
 
 #### 3.4.2 calculateRunSize()：计算 Subpage 需要的 run 大小
 
@@ -626,7 +614,6 @@ private int calculateRunSize(int sizeIdx) {
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunk.java calculateRunSize() 方法第650-680行，逐行核对，差异：无 -->
 
 **与 allocateRun() 的关键区别**：
 1. **先分配整个 run**：调用 `allocateRun()` 分配一个完整的 run
@@ -668,7 +655,6 @@ boolean allocate(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadC
 }
 ```
 
-<!-- 核对记录：已对照 PoolChunkList.java allocate() 方法第80-100行，逐行核对，差异：无 -->
 
 **晋升条件**：`cur.freeBytes <= freeMinThreshold`（空闲字节数低于阈值，使用率超过 maxUsage）
 
@@ -688,7 +674,6 @@ boolean free(PoolChunk<T> chunk, long handle, int normCapacity, ByteBuffer nioBu
 
 **降级条件**：`chunk.freeBytes > freeMaxThreshold`（空闲字节数超过阈值，使用率低于 minUsage）
 
-<!-- 核对记录：已对照 PoolChunkList.java free() 方法，逐行核对，差异：无 -->
 
 ### 4.3 move0()：Chunk 移动逻辑
 
@@ -708,7 +693,6 @@ private boolean move0(PoolChunk<T> chunk) {
 - **q000 的 prevList == null**：`move0()` 返回 `false`，由调用方（`PoolArena.free()`）负责销毁 Chunk
 - **其他情况**：调用 `prevList.move(chunk)`，递归向下找到合适的 PoolChunkList
 
-<!-- 核对记录：已对照 PoolChunkList.java move0() 方法，修正了 chunk.destroy() 错误（源码是 prevList.move(chunk)），差异已修正 -->
 
 ### 4.4 PoolArena.allocateNormal() 的分配顺序
 
@@ -735,7 +719,6 @@ private void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, 
 }
 ```
 
-<!-- 核对记录：已对照 PoolArena.java allocateNormal() 方法，逐行核对，差异：文档添加了解释性注释，逻辑与源码完全一致 -->
 
 🔥 **面试高频**：为什么分配顺序是 q050 → q025 → q000 → qInit → q075？
 
@@ -853,7 +836,6 @@ sizeIdx -> elemSize -> runSize -> nElements:
 - **28672B（sizeIdx=38，Small/Normal 边界）**：需要 7 个 Page（57344B），只有 2 个 slot
 - **规律**：elemSize 越大，runSize 越大，nElements 越少
 
-<!-- 核对记录：已运行 PoolChunkVerification.java，所有数值均为真实输出，差异：无 -->
 
 ---
 
@@ -993,7 +975,6 @@ if (q050.allocate(...) || q025.allocate(...) || q000.allocate(...) ||
 ⚠️ **生产踩坑**：如果业务有大量短生命周期的大对象（如大文件传输），会导致 Chunk 频繁在 q000 和 qInit 之间来回，
 可以通过调大 `io.netty.allocator.chunkSize` 或使用 `UnpooledByteBufAllocator` 来规避。
 
-<!-- 核对记录：已对照 PoolArena.java 构造函数和 allocateNormal() 方法，qInit.prevList(qInit) 和分配顺序与源码完全一致，差异：无 -->
 
 ---
 
@@ -1151,4 +1132,31 @@ if (q050.allocate(...) || q025.allocate(...) || q000.allocate(...) ||
 3. **锁竞争**：多线程共享同一个 PoolArena 时，`runsAvailLock` 可能成为瓶颈，可通过增加 `nArenas` 数量来分散竞争
 4. **Subpage 碎片**：大量不同 elemSize 的 Small 分配会导致 Subpage 碎片，每种 elemSize 独占一个 run，无法共享
 
-<!-- 核对记录：已对照 PoolChunk.java、PoolChunkList.java、PoolArena.java 全量源码，§8 所有结论均有源码支撑，差异：无 -->
+
+---
+
+## 附录：核对清单
+
+> 以下为文档编写过程中的源码核对记录，供审计追溯使用。
+
+1. 核对记录：已对照 PoolChunk.java 第130-185行，字段声明顺序与源码完全一致，差异：无
+2. 核对记录：已对照 PoolChunk.java 类字段声明，补全了 cleanable/base/unpooled/pinnedBytes/cachedNioBuffers 字段，差异已修正
+3. 核对记录：已对照 PoolChunk.java 第680-710行，编码/解码方法签名与源码完全一致，差异：无
+4. 核对记录：已对照 LongLongHashMap.java 第1-50行，字段声明和构造函数与源码完全一致，差异：无
+5. 核对记录：已对照 PoolChunkList.java 第34-71行，字段类型均为 private final int，阈值计算公式已验证，差异：已修正字段修饰符
+6. 核对记录：已对照 PoolChunk.java 第280-305行，allocateRun()方法逐行核对，差异：无
+7. 核对记录：已对照 PoolChunk.java 第315-340行，splitLargeRun()方法逐行核对，差异：无
+8. 核对记录：已对照 PoolChunk.java insertAvailRun() 方法，修正了懒初始化错误（源码是构造时全量初始化），差异已修正
+9. 核对记录：已对照 PoolChunk.java allocateRun() 完整调用链，时序逻辑与源码一致，差异：无
+10. 核对记录：已对照 PoolChunk.java free() 方法第500-540行，逐行核对，差异：无
+11. 核对记录：已对照 PoolChunk.java collapseRuns()、collapsePast()、collapseNext() 方法第550-600行，逐行核对，差异：无
+12. 核对记录：已对照 PoolChunk.java allocateSubpage() 方法第620-640行，逐行核对，差异：无
+13. 核对记录：已对照 PoolChunk.java calculateRunSize() 方法第650-680行，逐行核对，差异：无
+14. 核对记录：已对照 PoolChunkList.java allocate() 方法第80-100行，逐行核对，差异：无
+15. 核对记录：已对照 PoolChunkList.java free() 方法，逐行核对，差异：无
+16. 核对记录：已对照 PoolChunkList.java move0() 方法，修正了 chunk.destroy() 错误（源码是 prevList.move(chunk)），差异已修正
+17. 核对记录：已对照 PoolArena.java allocateNormal() 方法，逐行核对，差异：文档添加了解释性注释，逻辑与源码完全一致
+18. 核对记录：已运行 PoolChunkVerification.java，所有数值均为真实输出，差异：无
+19. 核对记录：已对照 PoolArena.java 构造函数和 allocateNormal() 方法，qInit.prevList(qInit) 和分配顺序与源码完全一致，差异：无
+20. 核对记录：已对照 PoolChunk.java、PoolChunkList.java、PoolArena.java 全量源码，§8 所有结论均有源码支撑，差异：无
+

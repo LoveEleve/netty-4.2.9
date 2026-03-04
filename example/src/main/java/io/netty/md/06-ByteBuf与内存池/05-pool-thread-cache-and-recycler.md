@@ -51,7 +51,6 @@ PoolArena 的 `allocate()` 和 `free()` 都需要加 `synchronized` 锁。在高
 
 ### 2.2 PoolThreadCache 核心字段
 
-<!-- 核对记录：已对照 PoolThreadCache.java 字段声明，差异：无 -->
 
 ```java
 final class PoolThreadCache {
@@ -81,7 +80,6 @@ final class PoolThreadCache {
 
 ### 2.3 MemoryRegionCache 核心字段
 
-<!-- 核对记录：已对照 PoolThreadCache.java MemoryRegionCache 内部类，差异：无 -->
 
 ```java
 private abstract static class MemoryRegionCache<T> {
@@ -108,7 +106,6 @@ MemoryRegionCache(int size, SizeClass sizeClass) {
 
 #### 2.3.2 Entry 的结构
 
-<!-- 核对记录：已对照 PoolThreadCache.java Entry 内部类，差异：无 -->
 
 ```java
 static final class Entry<T> {
@@ -126,7 +123,6 @@ static final class Entry<T> {
 
 ### 2.4 两种子类：SubPageMemoryRegionCache / NormalMemoryRegionCache
 
-<!-- 核对记录：已对照 PoolThreadCache.java 两个子类，差异：无 -->
 
 ```java
 // Small 分配：调用 chunk.initBufWithSubpage()
@@ -156,7 +152,6 @@ private static final class NormalMemoryRegionCache<T> extends MemoryRegionCache<
 
 ### 2.5 构造函数：缓存数组的初始化
 
-<!-- 核对记录：已对照 PoolThreadCache.java 构造函数，差异：无 -->
 
 ```java
 PoolThreadCache(PoolArena<byte[]> heapArena, PoolArena<ByteBuffer> directArena,
@@ -188,7 +183,6 @@ PoolThreadCache(PoolArena<byte[]> heapArena, PoolArena<ByteBuffer> directArena,
 
 ### 3.1 allocate()：从缓存命中分配
 
-<!-- 核对记录：已对照 PoolThreadCache.java allocateSmall/allocateNormal/allocate 方法，差异：无 -->
 
 ```java
 boolean allocateSmall(PoolArena<?> area, PooledByteBuf<?> buf, int reqCapacity, int sizeIdx) {
@@ -241,7 +235,6 @@ public final boolean allocate(PooledByteBuf<T> buf, int reqCapacity, PoolThreadC
 
 ### 3.2 add()：释放时放入缓存
 
-<!-- 核对记录：已对照 PoolThreadCache.java add() 方法，差异：无 -->
 
 ```java
 @SuppressWarnings({ "unchecked", "rawtypes" })
@@ -280,7 +273,6 @@ public final boolean add(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, 
 
 ### 3.3 trim()：定期清理冷缓存
 
-<!-- 核对记录：已对照 PoolThreadCache.java trim() 和 MemoryRegionCache.trim() 方法，差异：无 -->
 
 ```java
 void trim() {
@@ -308,7 +300,6 @@ public final void trim() {
 
 ### 3.4 free()：线程销毁时全量清理
 
-<!-- 核对记录：已对照 PoolThreadCache.java free() 方法，差异：无 -->
 
 ```java
 void free(boolean finalizer) {
@@ -345,7 +336,6 @@ void free(boolean finalizer) {
 
 ### 3.5 cacheForNormal 的 sizeIdx 偏移
 
-<!-- 核对记录：已对照 PoolThreadCache.java cacheForNormal() 方法，差异：无 -->
 
 ```java
 private MemoryRegionCache<?> cacheForNormal(PoolArena<?> area, int sizeIdx) {
@@ -450,7 +440,6 @@ Netty 中有大量短生命周期对象（如 `PooledByteBuf`、`MemoryRegionCac
 
 ### 6.2 Recycler 核心字段
 
-<!-- 核对记录：已对照 Recycler.java 字段声明，差异：无 -->
 
 ```java
 public abstract class Recycler<T> {
@@ -470,7 +459,6 @@ public abstract class Recycler<T> {
 
 ### 6.3 LocalPool 核心字段
 
-<!-- 核对记录：已对照 Recycler.java LocalPool 抽象类，差异：无 -->
 
 ```java
 private abstract static class LocalPool<H, T> {
@@ -496,7 +484,6 @@ private abstract static class LocalPool<H, T> {
 
 ### 6.4 DefaultHandle（GuardedLocalPool 专用）
 
-<!-- 核对记录：已对照 Recycler.java DefaultHandle 内部类，差异：无 -->
 
 ```java
 private static final class DefaultHandle<T> extends EnhancedHandle<T> {
@@ -543,7 +530,6 @@ private static final class DefaultHandle<T> extends EnhancedHandle<T> {
 
 ### 7.1 get()：从对象池获取对象
 
-<!-- 核对记录：已对照 Recycler.java get() 方法，差异：无 -->
 
 ```java
 public final T get() {
@@ -561,7 +547,6 @@ public final T get() {
 
 **GuardedLocalPool.getWith()** 流程：
 
-<!-- 核对记录：已对照 Recycler.java GuardedLocalPool.getWith() 方法，差异：无 -->
 
 ```java
 @Override
@@ -592,7 +577,6 @@ public T getWith(Recycler<T> recycler) {
 
 ### 7.2 LocalPool.acquire()
 
-<!-- 核对记录：已对照 Recycler.java LocalPool.acquire() 方法，差异：无 -->
 
 ```java
 protected final H acquire() {
@@ -615,7 +599,6 @@ protected final H acquire() {
 
 ### 7.3 recycle()：同线程 vs 跨线程
 
-<!-- 核对记录：已对照 Recycler.java LocalPool.release() 方法，差异：无 -->
 
 ```java
 protected final void release(H handle) {
@@ -645,7 +628,6 @@ protected final void release(H handle) {
 
 ### 7.4 canAllocatePooled()：ratio 控制
 
-<!-- 核对记录：已对照 Recycler.java LocalPool.canAllocatePooled() 方法，差异：无 -->
 
 ```java
 boolean canAllocatePooled() {
@@ -842,4 +824,30 @@ pool size after 9 gets (no recycle): 0
 ⚠️ **生产踩坑：freeSweepAllocationThreshold 调优**
 > 默认值 8192 适合大多数场景。如果业务线程分配频率极高，可以适当增大此值，减少 trim() 频率；如果内存敏感，可以减小此值，更积极地归还冷缓存。
 
-<!-- 核对记录：整篇文档已完成层2全局扫描，所有源码块均已对照真实源码核对，差异：无 -->
+
+---
+
+## 附录：核对清单
+
+> 以下为文档编写过程中的源码核对记录，供审计追溯使用。
+
+1. 核对记录：已对照 PoolThreadCache.java 字段声明，差异：无
+2. 核对记录：已对照 PoolThreadCache.java MemoryRegionCache 内部类，差异：无
+3. 核对记录：已对照 PoolThreadCache.java Entry 内部类，差异：无
+4. 核对记录：已对照 PoolThreadCache.java 两个子类，差异：无
+5. 核对记录：已对照 PoolThreadCache.java 构造函数，差异：无
+6. 核对记录：已对照 PoolThreadCache.java allocateSmall/allocateNormal/allocate 方法，差异：无
+7. 核对记录：已对照 PoolThreadCache.java add() 方法，差异：无
+8. 核对记录：已对照 PoolThreadCache.java trim() 和 MemoryRegionCache.trim() 方法，差异：无
+9. 核对记录：已对照 PoolThreadCache.java free() 方法，差异：无
+10. 核对记录：已对照 PoolThreadCache.java cacheForNormal() 方法，差异：无
+11. 核对记录：已对照 Recycler.java 字段声明，差异：无
+12. 核对记录：已对照 Recycler.java LocalPool 抽象类，差异：无
+13. 核对记录：已对照 Recycler.java DefaultHandle 内部类，差异：无
+14. 核对记录：已对照 Recycler.java get() 方法，差异：无
+15. 核对记录：已对照 Recycler.java GuardedLocalPool.getWith() 方法，差异：无
+16. 核对记录：已对照 Recycler.java LocalPool.acquire() 方法，差异：无
+17. 核对记录：已对照 Recycler.java LocalPool.release() 方法，差异：无
+18. 核对记录：已对照 Recycler.java LocalPool.canAllocatePooled() 方法，差异：无
+19. 核对记录：整篇文档已完成层2全局扫描，所有源码块均已对照真实源码核对，差异：无
+

@@ -7,6 +7,9 @@
 
 ---
 
+
+> 📦 **可运行 Demo**：[Ch07_CodecDemo.java](./Ch07_CodecDemo.java) —— 编解码与粘包拆包验证，直接运行 `main` 方法即可。
+
 ## 一、解决什么问题
 
 ### 1.1 TCP 粘包/拆包的本质
@@ -174,7 +177,6 @@ public void channelRead(ChannelHandlerContext ctx, Object input) throws Exceptio
 }
 ```
 
-<!-- 核对记录：已对照 ByteToMessageDecoder.java 源码第 258-310 行，差异：无 -->
 
 ### 3.2 callDecode() 解码循环
 
@@ -227,7 +229,6 @@ protected void callDecode(ChannelHandlerContext ctx, ByteBuf in, List<Object> ou
 }
 ```
 
-<!-- 核对记录：已对照 ByteToMessageDecoder.java 源码第 388-430 行，差异：无 -->
 
 **关键逻辑**：
 - **退出条件 [5]**：`out.isEmpty() && oldInputLength == in.readableBytes()` → 数据不足，等待下次 `channelRead`
@@ -295,7 +296,6 @@ public class FixedLengthFrameDecoder extends ByteToMessageDecoder {
 }
 ```
 
-<!-- 核对记录：已对照 FixedLengthFrameDecoder.java 源码第 41-79 行，差异：无 -->
 
 **关键点**：`readRetainedSlice(frameLength)` 是零拷贝切片，不会复制数据，但会增加引用计数（需要下游 release）。
 
@@ -317,7 +317,6 @@ public class DelimiterBasedFrameDecoder extends ByteToMessageDecoder {
 }
 ```
 
-<!-- 核对记录：已对照 DelimiterBasedFrameDecoder.java 源码第 62-71 行，差异：无 -->
 
 **内置分隔符常量**：
 ```java
@@ -350,7 +349,6 @@ public class LengthFieldBasedFrameDecoder extends ByteToMessageDecoder {
 }
 ```
 
-<!-- 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 187-200 行，差异：无 -->
 
 #### 4.3.2 核心公式
 
@@ -497,7 +495,6 @@ protected Object decode(ChannelHandlerContext ctx, ByteBuf in) throws Exception 
 }
 ```
 
-<!-- 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 395-445 行，差异：无 -->
 
 **关键设计 `frameLengthInt` 缓存**：
 - 第一次进入时（`frameLengthInt == -1`）：读取并计算帧长度，缓存到 `frameLengthInt`
@@ -524,7 +521,6 @@ private void exceededFrameLength(ByteBuf in, long frameLength) {
 }
 ```
 
-<!-- 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 363-378 行，差异：无 -->
 
 **failFast 参数的含义**：
 - `failFast=true`（默认）：一旦检测到超长帧，立即抛 `TooLongFrameException`，不等帧数据到齐
@@ -602,7 +598,6 @@ public abstract class MessageToByteEncoder<I> extends ChannelOutboundHandlerAdap
 }
 ```
 
-<!-- 核对记录：已对照 MessageToByteEncoder.java 源码第 100-161 行，差异：无 -->
 
 **关键点**：
 - 步骤 [6]：`encode()` 完成后立即 `release(cast)`，原始消息的引用计数减 1。如果子类在 `encode()` 中 `retain()` 了消息，需要自己管理引用计数
@@ -694,7 +689,6 @@ public class LengthFieldPrepender extends MessageToMessageEncoder<ByteBuf> {
 }
 ```
 
-<!-- 核对记录：已对照 LengthFieldPrepender.java 源码第 159-201 行，差异：无 -->
 
 **真实数值验证（运行输出）**：
 ```
@@ -1120,3 +1114,21 @@ public class MyEncoder extends MessageToByteEncoder<MyMessage> {
 1. `MERGE_CUMULATOR` 中 `!cumulation.isReadable() && in.isContiguous()` 分支——`isContiguous()` 是 4.2 新增的方法，用于判断 ByteBuf 是否是连续内存（非 CompositeByteBuf），文档中已说明 ✅
 2. `channelRead()` 中的 `do-while` 循环——处理重入场景，`inputMessages` 队列中的消息在当前 decode 完成后继续处理，文档中已说明 ✅
 3. `frameLengthInt` 缓存机制——避免在数据未到齐时重复解析长度字段，文档中已说明 ✅
+
+
+---
+
+## 附录：核对清单
+
+> 以下为文档编写过程中的源码核对记录，供审计追溯使用。
+
+1. 核对记录：已对照 ByteToMessageDecoder.java 源码第 258-310 行，差异：无
+2. 核对记录：已对照 ByteToMessageDecoder.java 源码第 388-430 行，差异：无
+3. 核对记录：已对照 FixedLengthFrameDecoder.java 源码第 41-79 行，差异：无
+4. 核对记录：已对照 DelimiterBasedFrameDecoder.java 源码第 62-71 行，差异：无
+5. 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 187-200 行，差异：无
+6. 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 395-445 行，差异：无
+7. 核对记录：已对照 LengthFieldBasedFrameDecoder.java 源码第 363-378 行，差异：无
+8. 核对记录：已对照 MessageToByteEncoder.java 源码第 100-161 行，差异：无
+9. 核对记录：已对照 LengthFieldPrepender.java 源码第 159-201 行，差异：无
+

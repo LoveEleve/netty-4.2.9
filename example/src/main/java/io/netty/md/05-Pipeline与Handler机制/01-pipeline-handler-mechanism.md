@@ -1,5 +1,8 @@
 # 05-01 Pipeline 与 Handler 机制深度分析
 
+
+> 📦 **可运行 Demo**：[Ch05_PipelineDemo.java](./Ch05_PipelineDemo.java) —— Pipeline 与 Handler 动态操作验证，直接运行 `main` 方法即可。
+
 ## 一、解决什么问题
 
 ### 1.1 核心问题
@@ -931,12 +934,14 @@ private AbstractChannelHandlerContext findContextInbound(int mask) {
 }
 ```
 
-**预期输出**（Pipeline: Head → OutboundEncoder → InboundDecoder → BusinessHandler → Tail）：
+**源码推理输出**（Pipeline: Head → OutboundEncoder → InboundDecoder → BusinessHandler → Tail）：
 ```
 [VERIFY] findContextInbound: checking OutboundEncoder#0 executionMask=0x1FE01 mask=0x20 skip=true
 [VERIFY] findContextInbound: checking InboundDecoder#0 executionMask=0x20 mask=0x20 skip=false
 ```
 → 确认 OutboundEncoder 被跳过，InboundDecoder 被选中（InboundDecoder 只覆盖 channelRead，executionMask=0x20）
+
+> ✅ 此结论已通过 `Ch05_PipelineVerify.java` 的 `testExecutionMaskSkip()` 真实运行验证——纯 Outbound Handler 确实被 Inbound 事件跳过。
 
 ### 验证方案2：验证 PendingHandlerCallback 执行时机
 
@@ -952,7 +957,7 @@ while (task != null) {
 }
 ```
 
-**预期输出**：
+**源码推理输出**：
 ```
 [VERIFY] callHandlerAdded for: MyDecoder#0 thread=nioEventLoopGroup-3-1
 ```
@@ -967,15 +972,52 @@ pipeline1.addLast(handler);
 pipeline2.addLast(handler);  // 应该抛出 ChannelPipelineException
 ```
 
-**预期输出**：
+**真实运行输出**（通过 `Ch05_PipelineVerify.java` 的 `testShareableProtection()` 验证）：
 ```
-io.netty.channel.ChannelPipelineException: MyDecoder is not a @Sharable handler,
-so can't be added or removed multiple times.
+✅ 正确抛出异常: ChannelPipelineException
+   消息: io.netty.channel.ChannelInboundHandlerAdapter is not a @Sharable handler,
+   so can't be added or removed multiple times.
 ```
 
----
+### 真实运行验证（Ch05_PipelineVerify.java 完整输出）
 
-## 十三、面试问答
+> 以下输出通过运行 `Ch05_PipelineVerify.java`（使用 EmbeddedChannel，无需网络连接）获得：
+
+```
+===== 1. Pipeline 事件传播方向验证 =====
+Pipeline 结构: [Outbound#0, Inbound-1#0, Inbound-2#0, DefaultChannelPipeline$TailContext#0]
+[Inbound-1] channelRead: Hello
+[Inbound-2] channelRead: Hello
+[Outbound] write 事件经过: Outbound#0
+Outbound 输出: Echo!
+
+===== 2. 动态添加/移除 Handler =====
+[Logger] 消息经过 logger handler
+[Biz] 第1次处理消息
+[Logger] 消息经过 logger handler
+[Biz] 第2次处理消息
+[Pipeline] 已移除 logger, 当前 handler: [biz, DefaultChannelPipeline$TailContext#0]
+[Biz] 第3次处理消息
+
+===== 3. @Sharable 保护验证 =====
+✅ 正确抛出异常: ChannelPipelineException
+   消息: io.netty.channel.ChannelInboundHandlerAdapter is not a @Sharable handler,
+   so can't be added or removed multiple times.
+
+===== 4. executionMask 跳过验证 =====
+Pipeline: [PureOutbound#0, Inbound#0, DefaultChannelPipeline$TailContext#0]
+[Inbound] channelRead 收到消息 (PureOutbound 被跳过)
+→ Inbound 事件正确跳过了 PureOutbound handler
+
+✅ Pipeline 验证完成
+```
+
+**验证结论**：
+- ✅ Inbound 事件（channelRead）从 Head → Tail 方向传播，依次经过 Inbound-1 → Inbound-2
+- ✅ Outbound 事件（write）从 Tail → Head 方向传播，经过 Outbound handler
+- ✅ `pipeline.remove("logger")` 热插拔成功，第 3 条消息不再经过 logger
+- ✅ 非 `@Sharable` Handler 第二次添加到 Pipeline 时抛 `ChannelPipelineException`
+- ✅ `executionMask` 机制正确跳过了纯 Outbound Handler 的 Inbound 事件
 
 ### Q1：Pipeline 的数据结构是什么？🔥
 
@@ -1019,6 +1061,100 @@ so can't be added or removed multiple times.
 - 如果 Channel 已注册且当前在 EventLoop 线程：直接调用
 - 如果 Channel 已注册但不在 EventLoop 线程：提交任务到 EventLoop 执行
 - 如果 Channel 未注册：加入 `pendingHandlerCallbackHead` 链表，等注册完成后执行
+
+---
+
+## 十三（补充）、线程交互图
+
+> 大纲 [[memory:xazvryag]] 要求每个模块产出四类图，Pipeline 之前有对象关系图、时序图、状态机图（Handler 生命周期），这里补充**线程交互图**。
+
+### 13.1 Pipeline 操作的线程安全模型
+
+```mermaid
+graph TB
+    subgraph "外部线程 (业务线程 / 非 EventLoop 线程)"
+        T1["pipeline.addLast(handler)"]
+        T2["pipeline.remove(handler)"]
+        T3["channel.writeAndFlush(msg)"]
+    end
+
+    subgraph "EventLoop 线程"
+        EL_ADD["callHandlerAdded0()"]
+        EL_REM["callHandlerRemoved0()"]
+        EL_IN["Inbound 事件传播<br/>(channelRead/channelActive...)"]
+        EL_OUT["Outbound 事件传播<br/>(write/flush/close...)"]
+        EL_EXEC["ctx.executor().execute()"]
+    end
+
+    T1 -->|"synchronized(this)<br/>链表插入"| EL_ADD
+    T1 -->|"已注册 && 非EL线程"| EL_EXEC
+    EL_EXEC --> EL_ADD
+
+    T2 -->|"synchronized(this)<br/>链表删除"| EL_REM
+
+    T3 -->|"非EL线程"| EL_EXEC
+    EL_EXEC --> EL_OUT
+
+    EL_IN -->|"ctx.fireChannelRead()"| EL_IN
+    EL_OUT -->|"ctx.write()"| EL_OUT
+
+    style T1 fill:#ffcdd2
+    style T2 fill:#ffcdd2
+    style T3 fill:#ffcdd2
+    style EL_ADD fill:#c8e6c9
+    style EL_REM fill:#c8e6c9
+    style EL_IN fill:#c8e6c9
+    style EL_OUT fill:#c8e6c9
+    style EL_EXEC fill:#fff3e0
+```
+
+### 13.2 线程安全分析表
+
+| 操作 | 调用线程 | 线程安全机制 | 备注 |
+|------|---------|-------------|------|
+| `addLast(handler)` | 任意线程 | `synchronized(this)` | 链表操作加锁；`handlerAdded()` 回调在 EventLoop 执行 |
+| `remove(handler)` | 任意线程 | `synchronized(this)` | 链表操作加锁；`handlerRemoved()` 回调在 EventLoop 执行 |
+| `fireChannelRead(msg)` | **仅 EventLoop** | 单线程保证 | Inbound 事件在 EventLoop 线程中从 Head→Tail 传播 |
+| `write(msg)` | 任意线程 | `ctx.executor().execute()` | 非 EventLoop 线程调用时自动封装为任务提交到 EventLoop |
+| `flush()` | 任意线程 | `ctx.executor().execute()` | 同 write |
+| `close()` | 任意线程 | `ctx.executor().execute()` | 同 write |
+| `ctx.fireXxx()` | **仅 EventLoop** | 单线程保证 | 直接在当前线程传播（不封装任务） |
+| `ctx.write/flush/close()` | **仅 EventLoop** | 单线程保证 | 直接在当前线程传播（不封装任务） |
+
+> 🔥 **面试关键**：`ctx.write()` 和 `channel.write()` 的**线程行为不同**：
+> - `ctx.write()`：如果在 EventLoop 线程调用，**直接同步传播**（高性能）
+> - `channel.write()`：等价于 `pipeline.write()`，如果在非 EventLoop 线程调用，会被**封装为 WriteTask 提交到 EventLoop**
+
+### 13.3 Pipeline 中的 EventExecutor 切换
+
+当 `addLast(executor, handler)` 指定了自定义 Executor 时，事件传播会在 Handler 之间**切换线程**：
+
+```mermaid
+sequenceDiagram
+    participant EL as EventLoop 线程
+    participant BE as Business Executor 线程
+    participant Head as HeadContext
+    participant H1 as Handler1 (EventLoop)
+    participant H2 as Handler2 (BusinessExecutor)
+    participant H3 as Handler3 (EventLoop)
+
+    Note over EL: channelRead 从网络层触发
+    EL->>Head: channelRead(msg)
+    Head->>H1: fireChannelRead(msg)
+    Note over H1: H1 的 executor == EventLoop ✅ 直接调用
+    H1->>H1: 处理消息
+    H1->>H2: fireChannelRead(msg)
+    Note over H1,H2: H2 的 executor != EventLoop<br/>封装为 Runnable 提交到 BusinessExecutor
+    H1-->>BE: executor.execute(new ChannelRead(ctx, msg))
+    BE->>H2: channelRead(msg)
+    Note over H2: 在 BusinessExecutor 线程执行
+    H2->>H3: fireChannelRead(msg)
+    Note over H2,H3: H3 的 executor == EventLoop<br/>封装为 Runnable 提交回 EventLoop
+    BE-->>EL: eventLoop.execute(new ChannelRead(ctx, msg))
+    EL->>H3: channelRead(msg)
+```
+
+> ⚠️ **生产踩坑**：跨 Executor 传播会引入**线程切换开销**（每次约 1-5μs），且消息的处理顺序不再严格保证。如果业务 Handler 需要保序，必须确保指定的 Executor 是**单线程的**（`DefaultEventExecutorGroup(1)`）。
 
 ---
 
@@ -1083,3 +1219,23 @@ A：因为 `HeadContext` 是 inbound 事件的起点，如果异常在 `HeadCont
 **Q：`pipeline.write()` 从 `tail` 开始，而 `ctx.write()` 从当前节点开始，有什么区别？**
 
 A：`pipeline.write(msg)` 等价于 `tail.write(msg)`，从 tail 开始向 head 方向找第一个关心 write 的 outbound handler。而 `ctx.write(msg)` 从当前 ctx 开始向 head 方向找，跳过当前节点之后（tail 方向）的 handler。这意味着：在 BusinessHandler 中调用 `ctx.write()` 只会经过 BusinessHandler 之前（head 方向）的 outbound handler，不会经过 BusinessHandler 之后（tail 方向）的 outbound handler。
+
+<!-- 核对记录（2026-03-03 源码逐字核对）：
+  1. 已对照 DefaultChannelPipeline 全部字段声明（DefaultChannelPipeline.java），差异：无
+  2. 已对照 DefaultChannelPipeline 构造器（DefaultChannelPipeline.java），差异：无
+  3. 已对照 HeadContext 完整实现（DefaultChannelPipeline.java），差异：无
+  4. 已对照 TailContext 完整实现（DefaultChannelPipeline.java），差异：无
+  5. 已对照 internalAdd() 方法（DefaultChannelPipeline.java），差异：无（文档省略了 default 分支的异常抛出）
+  6. 已对照 checkMultiplicity() 方法（DefaultChannelPipeline.java），差异：无
+  7. 已对照 addLast0() 方法（DefaultChannelPipeline.java），差异：无
+  8. 已对照 remove() 方法（DefaultChannelPipeline.java），差异：无
+  9. 已对照 callHandlerAddedForAllHandlers() 方法（DefaultChannelPipeline.java），差异：无
+  10. 已对照 AbstractChannelHandlerContext 全部字段（11个）（AbstractChannelHandlerContext.java），差异：无
+  11. 已对照 fireChannelRead() 方法（DefaultChannelPipeline + AbstractChannelHandlerContext），差异：无
+  12. 已对照 write() 方法含 findContextOutbound（AbstractChannelHandlerContext.java），差异：无
+  13. 已对照 findContextInbound/findContextOutbound/skipContext（AbstractChannelHandlerContext.java），差异：无
+  14. 已对照 invokeHandler() 方法（AbstractChannelHandlerContext.java），差异：无
+  15. 已对照 ChannelHandlerMask 全部常量 + mask0() + isSkippable()（ChannelHandlerMask.java），差异：无
+  16. 已对照 fireExceptionCaught() 方法（AbstractChannelHandlerContext.java），差异：无
+  结论：全部无差异
+-->
